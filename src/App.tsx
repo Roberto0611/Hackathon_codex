@@ -69,71 +69,7 @@ const INITIAL_STATE = {
 export default function App() {
   const [data, setData] = useState(INITIAL_STATE);  const [historial, setHistorial] = useState<Record<string, number>>({});
   // --- Simulación de WebSocket (Tiempo Real) ---
-  useEffect(() => {
-    const interval = setInterval(() => {
-      setData((prev) => {
-        const newData = { ...prev };
-
-        // 1. Simular amperaje fluctuante
-        const variacion = (Math.random() * 6 - 3); // -3 a +3
-        const nuevoAmperaje = Math.max(60, Math.min(115, prev.amperaje.actual + variacion));
-        newData.amperaje = { ...prev.amperaje, actual: Math.round(nuevoAmperaje) };
-
-        // Actualizar historial
-        const nuevoHistorial = [...prev.historial_amperaje, Math.round(nuevoAmperaje)];
-        if (nuevoHistorial.length > 15) nuevoHistorial.shift();
-        newData.historial_amperaje = nuevoHistorial;
-
-        // 2. Simular movimiento en el mapa (cada 3 segundos aprox)
-        if (Math.random() > 0.7) {
-          setHistorial((prevHistorial) => ({
-            ...prevHistorial,
-            [`${prev.tractor_pos.x},${prev.tractor_pos.y}`]: prev.amperaje.actual
-          }));
-
-          let nx = prev.tractor_pos.x + 1;
-          let ny = prev.tractor_pos.y;
-          if (nx >= prev.mapa_terreno[0].length) {
-            nx = 0;
-            ny = (ny + 1) % prev.mapa_terreno.length;
-          }
-          newData.tractor_pos = { x: nx, y: ny };
-        }
-
-        // 3. Simular lógica del modal/countdown
-        if (prev.alerta.activa) {
-          if (prev.alerta.countdown > 1) {
-            newData.alerta = { ...prev.alerta, countdown: prev.alerta.countdown - 1 };
-          } else {
-            // Tiempo agotado: Ajuste automático
-            newData.alerta = { ...prev.alerta, activa: false };
-            newData.ajustes_automaticos += 1;
-            newData.kwh_ahorrados = +(prev.kwh_ahorrados + 0.1).toFixed(1);
-            newData.profundidad = { ...prev.profundidad, actual: prev.profundidad.recomendada };
-            newData.logs_recientes = [
-              `Automático: Profundidad ajustada a ${prev.profundidad.recomendada}cm`,
-              ...prev.logs_recientes.slice(0, 4)
-            ];
-          }
-        } else {
-          // Activar alerta aleatoria muy de vez en cuando para simular la demo
-          if (Math.random() > 0.95 && newData.profundidad.actual === 24) {
-             newData.alerta = {
-               activa: true,
-               tipo: "peak_shaving",
-               mensaje: "El sistema quiere ajustar velocidad a 5.5 km/h",
-               countdown: 7,
-               max_countdown: 7
-             };
-          }
-        }
-
-        return newData;
-      });
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, []);
+  useEffect(() => { const h=(e)=>{if(e.key==='tractor_telemetry'&&e.newValue){try{const t=JSON.parse(e.newValue);setData(p=>{const pa=t.amperaje.actual>t.amperaje.maximo;let cl=p.logs_recientes;let ca=p.alerta;if(pa&&!p.alerta.activa){ca={activa:true,tipo:'peak_shaving',mensaje:'Pico de consumo. Ajustando...',countdown:3,max_countdown:3};cl=['Pico de Amperaje',...cl.slice(0,3)];}else if(!pa&&p.alerta.activa){ca={...p.alerta,activa:false};}return{...p,...t,alerta:ca,logs_recientes:cl};});if(t.historial_mapa){const ch={};for(const[k,v] of Object.entries(t.historial_mapa)){ch[k]=v.amperaje;}setHistorial(ch);}}catch(err){}}};window.addEventListener('storage',h);return()=>window.removeEventListener('storage',h); }, []);
 
   const handleAceptarAjuste = () => {
     setData(prev => ({
