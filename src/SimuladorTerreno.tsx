@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback } from 'react';
 
 const CELL_TYPES = {
   NORMAL: { id: 'NORMAL', color: '#8B5E3C', emoji: '🟫', k: 30, name: 'Normal' },
@@ -36,7 +36,7 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
   const [paramVolt, setParamVolt] = useState(400);
   const [paramEff, setParamEff] = useState(0.85);
   const [paramMaxI, setParamMaxI] = useState(120);
-  const [animSpeed, setAnimSpeed] = useState(1000); // 2000 lento, 1000 normal, 500 rapido
+  const [animSpeed, setAnimSpeed] = useState(3000); // 2000 lento, 1000 normal, 500 rapido
 
   const historyAmpArr = useRef<number[]>([]);
 
@@ -105,6 +105,47 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
       }
 
       if (y >= mapSize) {
+        // Parcela completada - calcular estadísticas
+        const amperajes = Object.values(history).map(h => h.amperaje);
+        const amperajeTotal = amperajes.reduce((sum, amp) => sum + amp, 0);
+        const amperajePromedio = amperajeTotal / amperajes.length;
+        
+        // Calcular kWh total acumulado
+        let kwhTotal = 0;
+        Object.values(history).forEach(h => {
+          const timeInHours = 0.001 / paramV;
+          const kW = (h.amperaje * paramVolt) / 1000;
+          kwhTotal += kW * timeInHours;
+        });
+        
+        const estadisticasParcela = {
+          amperajePromedio,
+          amperajeTotal,
+          celdasRecorridas: Object.keys(history).length,
+          kwhTotal
+        };
+        
+        const finalState = {
+          parcelaCompletada: true,
+          estadisticasParcela,
+          posicion: prev,
+          amperaje: { actual: stats.amperajeActual, optimo: 75, maximo: paramMaxI },
+          profundidad: { actual: stats.profundidadActual, recomendada: paramD },
+          velocidad: paramV,
+          ajustes_automaticos: stats.ajustes,
+          kwh_ahorrados: stats.ajustes * 0.15,
+          historial_amperaje: [...historyAmpArr.current],
+          mapa_terreno: grid,
+          tractor_pos: prev,
+          historial_mapa: history
+        };
+        
+        try {
+          localStorage.setItem('tractor_telemetry', JSON.stringify(finalState));
+        } catch (e) {
+          console.error("Error writing to localStorage", e);
+        }
+        
         setSimState('FINISHED');
         return prev;
       }
@@ -158,6 +199,7 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
       }));
 
       const newState = {
+        parcelaCompletada: false,
         posicion: { x, y },
         amperaje: { actual: amperaje, optimo: 75, maximo: paramMaxI },
         profundidad: { actual: d_current, recomendada: paramD },
@@ -182,7 +224,7 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
 
       return { x, y };
     });
-  }, [mapSize, grid, paramA, paramN, paramD, paramV, paramVolt, paramEff, paramMaxI, onTick]);
+  }, [mapSize, grid, paramA, paramN, paramD, paramV, paramVolt, paramEff, paramMaxI, onTick, history, stats]);
 
   useEffect(() => {
     let timer: any;
@@ -193,6 +235,27 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
     }
     return () => clearInterval(timer);
   }, [simState, animSpeed, stepSimulation]);
+
+  // Escuchar señales de control desde el dashboard
+  useEffect(() => {
+    const handleControl = (e: StorageEvent) => {
+      if (e.key === 'simulacion_control' && e.newValue) {
+        try {
+          const control = JSON.parse(e.newValue);
+          if (control.action === 'pause' && simState === 'RUNNING') {
+            setSimState('PAUSED');
+          } else if (control.action === 'resume' && simState === 'PAUSED') {
+            setSimState('RUNNING');
+          }
+        } catch (err) {
+          console.error("Error parsing control signal", err);
+        }
+      }
+    };
+    
+    window.addEventListener('storage', handleControl);
+    return () => window.removeEventListener('storage', handleControl);
+  }, [simState]);
 
   const getAmperajeColor = (amp: number) => {
     if (amp < 70) return { bg: '#1a5c1a', text: '#FFF', op: 0.6 };
@@ -251,7 +314,7 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
                 overlay = (
                   <div className="absolute inset-0 flex items-center justify-center font-bold text-[10px] transition-all duration-200 z-10" style={{ backgroundColor: colors.bg, color: colors.text, opacity: isTractor ? 0.3 : 1 }}>
                     <div className="absolute inset-0" style={{ backgroundColor: colors.bg, opacity: colors.op }}></div>
-                    <span className="relative z-10 drop-shadow-md">{Math.round(hist.amperaje)}A</span>
+                    <span className="relative z-10 drop-shadow-md">{hist.amperaje.toFixed(2)}A</span>
                   </div>
                 );
               }
@@ -354,6 +417,19 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
               </button>
             ))}
           </div>
+          
+          {/* Indicador de pausa por alerta */}
+          {simState === 'PAUSED' && (
+            <div className="mt-3 p-2 bg-yellow-50 border-l-4 border-[#FFDE00] rounded">
+              <div className="flex items-center gap-2">
+                <span className="text-xl">⏸</span>
+                <div className="text-xs">
+                  <div className="font-bold text-[#1A1A1A]">Pausado por Alerta</div>
+                  <div className="text-gray-600">Esperando decisión del operador...</div>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Live stats */}
@@ -361,7 +437,7 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
           <div className="w-1/3 min-w-[120px]">
             <span className="text-gray-500 block mb-1">AMPERAJE ACTUAL</span>
             <span className={`text-2xl font-bold ${stats.amperajeActual > paramMaxI ? 'text-red-500' : 'text-[#FFDE00]'}`}>
-              {stats.amperajeActual.toFixed(1)} A
+              {stats.amperajeActual.toFixed(2)} A
             </span>
           </div>
           <div className="w-1/3 min-w-[120px]">
@@ -384,7 +460,7 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
           </div>
           <div className="w-1/3 min-w-[120px]">
             <span className="text-gray-500 block mb-1">ENERGÍA (ESTIMADA)</span>
-            <span className="text-xl font-bold text-[#7db356]">{stats.kwhAcumulados.toFixed(3)} kWh</span>
+            <span className="text-xl font-bold text-[#7db356]">{stats.kwhAcumulados.toFixed(2)} kWh</span>
           </div>
         </div>
       </div>

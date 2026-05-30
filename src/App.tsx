@@ -67,9 +67,74 @@ const INITIAL_STATE = {
 };
 
 export default function App() {
-  const [data, setData] = useState(INITIAL_STATE);  const [historial, setHistorial] = useState<Record<string, number>>({});
+  const [data, setData] = useState(INITIAL_STATE);
+  const [historial, setHistorial] = useState<Record<string, number>>({});
+  const [parcelasCompletadas, setParcelasCompletadas] = useState<Array<{
+    fecha: string;
+    amperajePromedio: number;
+    amperajeTotal: number;
+    celdasRecorridas: number;
+    kwhTotal: number;
+  }>>([]);
+  
   // --- Simulación de WebSocket (Tiempo Real) ---
-  useEffect(() => { const h=(e)=>{if(e.key==='tractor_telemetry'&&e.newValue){try{const t=JSON.parse(e.newValue);setData(p=>{const pa=t.amperaje.actual>t.amperaje.maximo;let cl=p.logs_recientes;let ca=p.alerta;if(pa&&!p.alerta.activa){ca={activa:true,tipo:'peak_shaving',mensaje:'Pico de consumo. Ajustando...',countdown:3,max_countdown:3};cl=['Pico de Amperaje',...cl.slice(0,3)];}else if(!pa&&p.alerta.activa){ca={...p.alerta,activa:false};}return{...p,...t,alerta:ca,logs_recientes:cl};});if(t.historial_mapa){const ch={};for(const[k,v] of Object.entries(t.historial_mapa)){ch[k]=v.amperaje;}setHistorial(ch);}}catch(err){}}};window.addEventListener('storage',h);return()=>window.removeEventListener('storage',h); }, []);
+  useEffect(() => { 
+    const h=(e)=>{
+      if(e.key==='tractor_telemetry'&&e.newValue){
+        try{
+          const t=JSON.parse(e.newValue);
+          
+          // Detectar si la parcela se completó
+          if(t.parcelaCompletada && t.estadisticasParcela) {
+            const nuevaParcela = {
+              fecha: new Date().toLocaleString('es-ES', { 
+                day: '2-digit', 
+                month: '2-digit', 
+                year: 'numeric',
+                hour: '2-digit', 
+                minute: '2-digit' 
+              }),
+              amperajePromedio: parseFloat(t.estadisticasParcela.amperajePromedio.toFixed(2)),
+              amperajeTotal: parseFloat(t.estadisticasParcela.amperajeTotal.toFixed(2)),
+              celdasRecorridas: t.estadisticasParcela.celdasRecorridas,
+              kwhTotal: parseFloat(t.estadisticasParcela.kwhTotal.toFixed(2))
+            };
+            setParcelasCompletadas(prev => [nuevaParcela, ...prev]);
+          }
+          
+          setData(p=>{
+            const pa=t.amperaje.actual>t.amperaje.maximo;
+            let cl=p.logs_recientes;
+            let ca=p.alerta;
+            if(pa&&!p.alerta.activa){
+              ca={activa:true,tipo:'peak_shaving',mensaje:'Pico de consumo. Ajustando...',countdown:3,max_countdown:3};
+              cl=['Pico de Amperaje',...cl.slice(0,3)];
+              
+              // Pausar simulación cuando aparece alerta
+              try {
+                localStorage.setItem('simulacion_control', JSON.stringify({ action: 'pause' }));
+              } catch (e) {
+                console.error("Error writing to localStorage", e);
+              }
+            }else if(!pa&&p.alerta.activa){
+              ca={...p.alerta,activa:false};
+            }
+            return{...p,...t,alerta:ca,logs_recientes:cl};
+          });
+          
+          if(t.historial_mapa){
+            const ch={};
+            for(const[k,v] of Object.entries(t.historial_mapa)){
+              ch[k]=v.amperaje;
+            }
+            setHistorial(ch);
+          }
+        }catch(err){}
+      }
+    };
+    window.addEventListener('storage',h);
+    return()=>window.removeEventListener('storage',h); 
+  }, []);
 
   const handleAceptarAjuste = () => {
     setData(prev => ({
@@ -80,6 +145,13 @@ export default function App() {
       profundidad: { ...prev.profundidad, actual: prev.profundidad.recomendada },
       logs_recientes: [ `Manual: Confirmó ajuste recomendado`, ...prev.logs_recientes.slice(0, 4) ]
     }));
+    
+    // Reanudar simulación
+    try {
+      localStorage.setItem('simulacion_control', JSON.stringify({ action: 'resume' }));
+    } catch (e) {
+      console.error("Error writing to localStorage", e);
+    }
   };
 
   const handleRechazarAjuste = () => {
@@ -88,6 +160,13 @@ export default function App() {
       alerta: { ...prev.alerta, activa: false },
       logs_recientes: [ `Manual: Operador asume control puenteando sugerencia`, ...prev.logs_recientes.slice(0, 4) ]
     }));
+    
+    // Reanudar simulación
+    try {
+      localStorage.setItem('simulacion_control', JSON.stringify({ action: 'resume' }));
+    } catch (e) {
+      console.error("Error writing to localStorage", e);
+    }
   };
 
   // Preparar datos para las gráficas
@@ -110,7 +189,7 @@ export default function App() {
         <div className="flex gap-6 text-sm font-bold">
           <div className="flex flex-col items-center">
             <span className="text-white/80 uppercase text-[10px]">kWh Ahorrados</span>
-            <span className="text-2xl text-[#FFDE00] leading-none">{data.kwh_ahorrados}</span>
+            <span className="text-2xl text-[#FFDE00] leading-none">{data.kwh_ahorrados.toFixed(2)}</span>
           </div>
           <div className="flex flex-col items-center">
             <span className="text-white/80 uppercase text-[10px]">Ajustes Auto</span>
@@ -118,7 +197,7 @@ export default function App() {
           </div>
           <div className="flex flex-col items-center">
             <span className="text-white/80 uppercase text-[10px]">Batería Rest.</span>
-            <span className="text-2xl leading-none">{data.bateria.horas_restantes}h</span>
+            <span className="text-2xl leading-none">{data.bateria.horas_restantes.toFixed(2)}h</span>
           </div>
         </div>
       </header>
@@ -141,11 +220,11 @@ export default function App() {
                  style={{ transform: `rotate(${(data.amperaje.actual / data.amperaje.maximo) * 180 - 135}deg)`, borderColor: data.amperaje.actual > data.amperaje.optimo + 10 ? '#EF9A9A' : (data.amperaje.actual > data.amperaje.optimo ? '#FFDE00' : '#367C2B') }}
                ></div>
                <div className="absolute bottom-0 text-center w-full">
-                 <span className="text-3xl font-bold">{data.amperaje.actual}</span>
+                 <span className="text-3xl font-bold">{data.amperaje.actual.toFixed(2)}</span>
                  <span className="text-xs uppercase text-gray-500 ml-1">AMP</span>
                </div>
             </div>
-            <div className="text-xs text-gray-500 mt-2 font-bold mb-4">Óptimo: {data.amperaje.optimo}A</div>
+            <div className="text-xs text-gray-500 mt-2 font-bold mb-4">Óptimo: {data.amperaje.optimo.toFixed(2)}A</div>
           </div>
 
           <div className="flex justify-between items-end bg-[#F5F5F5] p-4 rounded-md">
@@ -165,7 +244,7 @@ export default function App() {
           <div className="grid grid-cols-2 gap-2">
             <div className="bg-[#F5F5F5] p-3 rounded-md">
               <div className="text-[10px] uppercase text-gray-500 font-bold">Velocidad</div>
-              <div className="text-lg font-bold">{data.velocidad.toFixed(1)} <span className="text-xs text-gray-500">km/h</span></div>
+              <div className="text-lg font-bold">{data.velocidad.toFixed(2)} <span className="text-xs text-gray-500">km/h</span></div>
             </div>
             <div className="bg-[#F5F5F5] p-3 rounded-md border-l-4 border-[#367C2B]">
               <div className="text-[10px] uppercase text-gray-500 font-bold">Motor</div>
@@ -198,7 +277,7 @@ export default function App() {
                   <span className="flex items-center text-[10px]"><span className="w-2 h-2 bg-[#EF9A9A] mr-1"></span> Alta</span>
                 </span>
                 <span className="flex gap-2 text-[9px] text-gray-400 font-bold mt-1">
-                  <span className="mr-1 relative -top-[1px]">RECORRIDO:</span>
+                  <span className="mr-1 relative -top-px">RECORRIDO:</span>
                   <span className="flex items-center"><span className="w-2 h-2 mr-1" style={{backgroundColor: '#1a5c1a', opacity: 0.6}}></span> &lt;70A</span>
                   <span className="flex items-center"><span className="w-2 h-2 mr-1" style={{backgroundColor: '#367C2B', opacity: 0.5}}></span> 70-85A</span>
                   <span className="flex items-center"><span className="w-2 h-2 mr-1" style={{backgroundColor: '#FFDE00', opacity: 0.6}}></span> 85-100A</span>
@@ -240,7 +319,7 @@ export default function App() {
                         overlay = (
                           <div className="absolute inset-0 flex items-center justify-center font-bold text-[10px]" style={{ backgroundColor: overColor, color: currentAmp <= 100 && currentAmp > 85 ? '#1A1A1A' : '#FFF' }}>
                             <div className="absolute inset-0" style={{ backgroundColor: overColor, opacity }}></div>
-                            <span className="relative z-0 drop-shadow-md">{currentAmp}A</span>
+                            <span className="relative z-0 drop-shadow-md">{currentAmp.toFixed(2)}A</span>
                           </div>
                         );
                       }
@@ -318,9 +397,9 @@ export default function App() {
           </div>
 
           {/* Log de operaciones */}
-          <div className="bg-white p-4 shadow-sm flex-1">
+          <div className="bg-white p-4 shadow-sm flex-1 flex flex-col">
             <h2 className="text-sm font-bold uppercase text-gray-500 mb-3 tracking-wider">Log de Ajustes</h2>
-            <ul className="space-y-3">
+            <ul className="space-y-3 flex-1 overflow-auto">
               {data.logs_recientes.map((log, index) => (
                 <li key={index} className="text-xs font-mono border-b border-gray-100 pb-2 text-gray-700">
                   <span className="text-[#367C2B] mr-2">►</span>{log}
@@ -328,6 +407,41 @@ export default function App() {
               ))}
             </ul>
           </div>
+
+          {/* Historial de Parcelas Completadas */}
+          {parcelasCompletadas.length > 0 && (
+            <div className="bg-white p-4 shadow-sm border-t-4 border-[#FFDE00]">
+              <h2 className="text-sm font-bold uppercase text-gray-500 mb-3 tracking-wider">Parcelas Completadas</h2>
+              <div className="space-y-3 max-h-64 overflow-auto">
+                {parcelasCompletadas.map((parcela, index) => (
+                  <div key={index} className="bg-[#F5F5F5] p-3 rounded-md border-l-4 border-[#367C2B]">
+                    <div className="flex justify-between items-start mb-2">
+                      <span className="text-[10px] font-bold text-gray-500 uppercase">{parcela.fecha}</span>
+                      <span className="text-xs font-bold text-[#367C2B]">#{parcelasCompletadas.length - index}</span>
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-xs">
+                      <div>
+                        <span className="text-gray-500 block text-[10px]">Amp Promedio</span>
+                        <span className="font-bold text-[#1A1A1A]">{parcela.amperajePromedio} A</span>
+                      </div>
+                      <div>
+                        <span className="text-gray-500 block text-[10px]">Amp Total</span>
+                        <span className="font-bold text-[#1A1A1A]">{parcela.amperajeTotal} A</span>
+                      </div>
+                      <div>
+                        <span className="text-gray-500 block text-[10px]">Celdas</span>
+                        <span className="font-bold text-[#1A1A1A]">{parcela.celdasRecorridas}</span>
+                      </div>
+                      <div>
+                        <span className="text-gray-500 block text-[10px]">Energía</span>
+                        <span className="font-bold text-[#FFDE00]">{parcela.kwhTotal} kWh</span>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
 
         </section>
       </main>
