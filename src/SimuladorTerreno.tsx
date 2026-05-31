@@ -9,6 +9,41 @@ const CELL_TYPES = {
   INUNDADO: { id: 'INUNDADO', color: '#2c5f8a', emoji: '🌊', k: 120, name: 'Inundado' }
 };
 
+// --- NÚCLEO IA · Parámetros de control predictivo ---
+const LOOKAHEAD = 4;   // celdas que la IA escanea hacia adelante
+const EASE_STEP = 2;   // cm máximo de ajuste de profundidad por tick
+
+// Amperaje resultante para una profundidad (cm) dada en un suelo de resistencia k
+function ampForDepth(k: number, a: number, n: number, v: number, eff: number, volt: number, d: number) {
+  const R_N = k * a * (d / 100) * n * 1000;
+  const v_ms = v / 3.6;
+  const P_watts = (R_N * v_ms) / eff;
+  return P_watts / volt;
+}
+
+// Profundidad máxima (cm) que mantiene el amperaje bajo el límite en un suelo k
+// El amperaje es lineal en d, así que se despeja directamente: amp = coef * d
+function safeDepth(k: number, a: number, n: number, v: number, eff: number, volt: number, maxI: number) {
+  const v_ms = v / 3.6;
+  const coef = (k * a * n * 1000 * v_ms) / eff / volt / 100;
+  if (coef <= 0) return 40;
+  return maxI / coef;
+}
+
+// Próximas `count` celdas según el patrón boustrophedon (mismo que stepSimulation)
+function nextCells(x: number, y: number, mapSize: number, count: number) {
+  const cells: { x: number; y: number }[] = [];
+  let cx = x, cy = y;
+  for (let i = 0; i < count; i++) {
+    const evenRow = cy % 2 === 0;
+    if (evenRow) { if (cx < mapSize - 1) cx++; else cy++; }
+    else { if (cx > 0) cx--; else cy++; }
+    if (cy >= mapSize) break;
+    cells.push({ x: cx, y: cy });
+  }
+  return cells;
+}
+
 export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) => void }) {
   // Configuración del mapa y editor
   const [mapSize, setMapSize] = useState(10);
@@ -22,6 +57,7 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
   const [history, setHistory] = useState<Record<string, { amperaje: number; profundidad_usada: number }>>({});
   const [stats, setStats] = useState({
     ajustes: 0,
+    preajustes: 0,
     kwhAcumulados: 0,
     amperajeActual: 0,
     profundidadActual: 20,
@@ -42,6 +78,15 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
 
   const historyAmpArr = useRef<number[]>([]);
 
+  // NÚCLEO IA: última predicción para visualización (celdas escaneadas, pico previsto)
+  const [prediccion, setPrediccion] = useState<{
+    amperajes: number[];
+    celdas: { x: number; y: number }[];
+    picoPrevisto: number;
+    dObjetivo: number;
+    preajuste: boolean;
+  } | null>(null);
+
   // Inicializar grid
   useEffect(() => {
     if (simState === 'IDLE') {
@@ -51,6 +96,7 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
       setTractorPos({ x: 0, y: 0 });
       setStats({
         ajustes: 0,
+        preajustes: 0,
         kwhAcumulados: 0,
         amperajeActual: 0,
         profundidadActual: paramD,
@@ -59,6 +105,7 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
         bateria: 50 // Reducido de 150 a 50 kWh para consumo más visible
       });
       historyAmpArr.current = [];
+      setPrediccion(null);
     }
   }, [mapSize, simState]);
 
@@ -166,28 +213,53 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
 
       const cellType = grid[y][x];
       const k = CELL_TYPES[cellType as keyof typeof CELL_TYPES].k;
-      
-      let d_current = stats.profundidadActual;
-      let amperaje = 0;
-      let requiredAdjustments = 0;
 
-      // Cálculo de fórmulas y peak shaving
+      // --- NÚCLEO IA: CONTROL PREDICTIVO ---
+      // 1. Escanear la ventana de celdas próximas y hallar la profundidad segura
+      //    más restrictiva (la celda crítica que viene adelante).
+      const ventana = [{ x, y }, ...nextCells(x, y, mapSize, LOOKAHEAD)];
+      let dObjetivo = paramD; // aspiramos siempre a la profundidad recomendada
+      ventana.forEach(c => {
+        const kc = CELL_TYPES[grid[c.y][c.x] as keyof typeof CELL_TYPES].k;
+        const dSafe = safeDepth(kc, paramA, paramN, paramV, paramEff, paramVolt, paramMaxI);
+        if (dSafe < dObjetivo) dObjetivo = dSafe;
+      });
+      dObjetivo = Math.max(10, Math.min(paramD, dObjetivo));
+
+      // 2. Mover la profundidad hacia el objetivo de forma gradual (anticipada).
+      //    Baja antes de llegar al pico; recupera cuando el terreno se alivia.
+      const dPrevia = stats.profundidadActual;
+      let d_current = dPrevia;
+      let preajuste = false;
+      if (d_current > dObjetivo + 0.01) {
+        d_current = Math.max(dObjetivo, d_current - EASE_STEP);
+        preajuste = true;
+      } else if (d_current < dObjetivo - 0.01) {
+        d_current = Math.min(dObjetivo, d_current + EASE_STEP);
+      }
+
+      // 3. Amperaje real en la celda con la profundidad ya pre-ajustada.
+      let amperaje = ampForDepth(k, paramA, paramN, paramV, paramEff, paramVolt, d_current);
+
+      // 4. Salvaguarda reactiva: solo si el terreno excede lo previsto (overload real).
+      let overloads = 0;
       let iterSafety = 10;
-        while (iterSafety > 0) {
-          const R_kN = k * paramA * (d_current / 100) * paramN;
-          const R_N = R_kN * 1000;
-          const v_ms = paramV / 3.6;
-          const P_watts = (R_N * v_ms) / paramEff;
-          amperaje = P_watts / paramVolt;
+      while (amperaje > paramMaxI && d_current > 10 && iterSafety > 0) {
+        d_current -= 2;
+        amperaje = ampForDepth(k, paramA, paramN, paramV, paramEff, paramVolt, d_current);
+        overloads++;
+        iterSafety--;
+      }
+      const requiredAdjustments = overloads;
 
-          if (amperaje > paramMaxI && d_current > 10) {
-            d_current -= 2;
-            requiredAdjustments++;
-          } else {
-            break;
-          }
-          iterSafety--;
-        }
+      // 5. Pronóstico para el dashboard: demanda prevista en las próximas celdas
+      //    SI se operara a profundidad recomendada (la curva de riesgo a anticipar).
+      const celdasFuturas = nextCells(x, y, mapSize, LOOKAHEAD);
+      const prediccionAmp = celdasFuturas.map(c => {
+        const kc = CELL_TYPES[grid[c.y][c.x] as keyof typeof CELL_TYPES].k;
+        return parseFloat(ampForDepth(kc, paramA, paramN, paramV, paramEff, paramVolt, paramD).toFixed(2));
+      });
+      const picoPrevisto = prediccionAmp.length > 0 ? Math.max(...prediccionAmp) : 0;
 
       const cellKey = `${x},${y}`;
       setHistory(prevHist => ({
@@ -209,16 +281,17 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
 
       setStats(prevStats => ({
         ajustes: prevStats.ajustes + requiredAdjustments,
+        preajustes: (prevStats.preajustes || 0) + (preajuste ? 1 : 0),
         kwhAcumulados: prevStats.kwhAcumulados + kWhThisCell,
         amperajeActual: amperaje,
         profundidadActual: d_current,
         recomendada: paramD,
-        kwhAhorrados: prevStats.kwhAhorrados + (requiredAdjustments * 0.15),
+        kwhAhorrados: prevStats.kwhAhorrados + (requiredAdjustments * 0.15) + (preajuste ? 0.1 : 0),
         bateria: Math.max(0, prevStats.bateria - kWhThisCell) // Usar kWhThisCell que ya incluye el factor 8x
       }));
 
       const newAj = stats.ajustes + requiredAdjustments;
-      const newAhorros = stats.kwhAhorrados + (requiredAdjustments * 0.15);
+      const newAhorros = stats.kwhAhorrados + (requiredAdjustments * 0.15) + (preajuste ? 0.1 : 0);
       const newBat = Math.max(0, stats.bateria - kWhThisCell);
       
       // Calcular horas restantes de forma más realista
@@ -239,6 +312,14 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
           horas_restantes: parseFloat(horasRestantes.toFixed(2))
         },
         historial_amperaje: [...historyAmpArr.current],
+        // --- NÚCLEO IA: control predictivo ---
+        prediccion: {
+          amperajes: prediccionAmp,        // amperaje previsto en próximas celdas (a prof. recomendada)
+          celdas: celdasFuturas,           // coords escaneadas hacia adelante
+          picoPrevisto,                    // pico de amperaje anticipado
+          dObjetivo: parseFloat(dObjetivo.toFixed(1)), // profundidad objetivo calculada por la IA
+          preajuste                        // si en este tick la IA pre-ajustó anticipadamente
+        },
         mapa_terreno: grid,
         tractor_pos: { x, y },
         historial_mapa: { ...history, [cellKey]: { amperaje, profundidad_usada: d_current } }
@@ -249,6 +330,8 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
       } catch (e) {
         console.error("Error writing to localStorage", e);
       }
+
+      setPrediccion(newState.prediccion);
 
       if (onTick) {
         onTick(newState);
@@ -339,6 +422,11 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
               const cellKey = `${x},${y}`;
               const hist = history[cellKey];
               const isTractor = tractorPos.x === x && tractorPos.y === y && simState !== 'IDLE';
+              // NÚCLEO IA: ¿esta celda está siendo escaneada hacia adelante?
+              const scanIdx = prediccion?.celdas?.findIndex(c => c.x === x && c.y === y) ?? -1;
+              const isScan = scanIdx >= 0 && simState === 'RUNNING';
+              const scanAmp = isScan ? prediccion!.amperajes[scanIdx] : 0;
+              const scanPeligro = scanAmp > paramMaxI;
               
               let overlay = null;
               if (hist) {
@@ -362,6 +450,20 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
                 >
                   <span className="absolute top-0.5 left-0.5 text-xs opacity-80">{typeData.emoji}</span>
                   {overlay}
+                  {/* NÚCLEO IA: marco de escaneo predictivo sobre celdas futuras */}
+                  {isScan && !hist && (
+                    <div
+                      className="absolute inset-0 z-20 pointer-events-none flex items-start justify-end p-0.5"
+                      style={{
+                        border: `2px dashed ${scanPeligro ? '#cc0000' : '#38bdf8'}`,
+                        boxShadow: `inset 0 0 8px ${scanPeligro ? 'rgba(204,0,0,0.5)' : 'rgba(56,189,248,0.4)'}`
+                      }}
+                    >
+                      <span className="text-[8px] font-bold px-0.5 rounded" style={{ backgroundColor: scanPeligro ? '#cc0000' : '#38bdf8', color: '#fff' }}>
+                        {scanAmp.toFixed(0)}
+                      </span>
+                    </div>
+                  )}
                   {isTractor && <span className="relative z-30 text-2xl drop-shadow-md">🚜</span>}
                 </div>
               );
@@ -462,6 +564,42 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
               </div>
             </div>
           )}
+
+          {/* NÚCLEO IA: Visión predictiva del terreno */}
+          <div className="mt-3 p-3 bg-[#0f1f2e] rounded border border-[#1e3a52]">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-[10px] font-bold uppercase tracking-wide text-[#38bdf8]">Visión IA · Escaneo</span>
+              <span className="text-[10px] text-gray-400">+{LOOKAHEAD} celdas</span>
+            </div>
+            {prediccion && prediccion.amperajes.length > 0 ? (
+              <>
+                {/* Mini-barras de amperaje previsto en próximas celdas */}
+                <div className="flex items-end gap-1 h-12 mb-2">
+                  {prediccion.amperajes.map((amp, i) => {
+                    const peligro = amp > paramMaxI;
+                    const h = Math.min(100, (amp / (paramMaxI * 1.3)) * 100);
+                    return (
+                      <div key={i} className="flex-1 flex flex-col items-center justify-end h-full">
+                        <span className="text-[8px] font-bold mb-0.5" style={{ color: peligro ? '#f87171' : '#38bdf8' }}>{amp.toFixed(0)}</span>
+                        <div className="w-full rounded-sm transition-all duration-300" style={{ height: `${h}%`, backgroundColor: peligro ? '#cc0000' : '#38bdf8' }}></div>
+                      </div>
+                    );
+                  })}
+                </div>
+                <div className="text-[10px] text-gray-300 leading-snug">
+                  {prediccion.picoPrevisto > paramMaxI ? (
+                    <span>
+                      <span className="text-[#f87171] font-bold">Pico previsto {prediccion.picoPrevisto.toFixed(0)}A</span> · pre-ajustando profundidad a <span className="text-[#FFDE00] font-bold">{prediccion.dObjetivo.toFixed(0)}cm</span> antes de llegar.
+                    </span>
+                  ) : (
+                    <span className="text-[#7db356]">Terreno despejado adelante. Operando a profundidad recomendada.</span>
+                  )}
+                </div>
+              </>
+            ) : (
+              <p className="text-[10px] text-gray-500">Inicia la simulación para activar el escaneo predictivo del terreno.</p>
+            )}
+          </div>
         </div>
 
         {/* Live stats */}
@@ -489,6 +627,10 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
           <div className="w-1/3 min-w-[120px]">
             <span className="text-gray-500 block mb-1">OVERLOADS REGISTRADOS</span>
             <span className="text-xl font-bold text-red-400">{stats.ajustes} eventos</span>
+          </div>
+          <div className="w-1/3 min-w-[120px]">
+            <span className="text-gray-500 block mb-1">PRE-AJUSTES IA</span>
+            <span className="text-xl font-bold text-[#38bdf8]">{stats.preajustes} anticipados</span>
           </div>
           <div className="w-1/3 min-w-[120px]">
             <span className="text-gray-500 block mb-1">ENERGÍA (ESTIMADA)</span>

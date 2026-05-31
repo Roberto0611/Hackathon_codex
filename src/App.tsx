@@ -7,7 +7,8 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  ReferenceArea
+  ReferenceArea,
+  ReferenceLine
 } from 'recharts';
 
 // --- Constantes de Diseño (Identidad John Deere) ---
@@ -135,7 +136,15 @@ const INITIAL_STATE = {
     [1, 1, 2, 2, 1]
   ],
   tractor_pos: { x: -1, y: -1 }, // fuera del mapa hasta que arranque la simulación
-  logs_recientes: [] as string[]
+  logs_recientes: [] as string[],
+  // NÚCLEO IA: control predictivo (poblado por el simulador en vivo)
+  prediccion: {
+    amperajes: [] as number[],
+    celdas: [] as { x: number; y: number }[],
+    picoPrevisto: 0,
+    dObjetivo: 0,
+    preajuste: false
+  }
 };
 
 // --- Perfil del operador reconocido al encender el tractor ---
@@ -160,6 +169,9 @@ export default function App() {
   }>>([]);
   const [mostrarReporte, setMostrarReporte] = useState(false);
   const [reporteActual, setReporteActual] = useState<any>(null);
+  // Cooldown anti-rebote: tras una decisión del operador, evita re-disparar la alerta
+  // predictiva durante unos ticks mientras el tractor cruza la zona ya advertida.
+  const alertCooldownRef = useRef(0);
   
   // --- Simulación de WebSocket (Tiempo Real) ---
   useEffect(() => { 
@@ -190,12 +202,18 @@ export default function App() {
           }
           
           setData(p=>{
-            const pa=t.amperaje.actual>t.amperaje.maximo;
+            // ANTICIPADO: la IA dispara la decisión cuando PREVÉ un pico adelante,
+            // no cuando ya ocurrió. (Salvaguarda: también si el actual supera el máximo.)
+            const picoPrev = t.prediccion?.picoPrevisto ?? 0;
+            const enCooldown = alertCooldownRef.current > 0;
+            if (enCooldown) alertCooldownRef.current -= 1;
+            const pa = !enCooldown && (picoPrev > t.amperaje.maximo || t.amperaje.actual > t.amperaje.maximo);
             let cl=p.logs_recientes;
             let ca=p.alerta;
             if(pa&&!p.alerta.activa){
-              ca={activa:true,tipo:'peak_shaving',mensaje:'Pico de consumo. Ajustando...',countdown:3,max_countdown:3};
-              cl=['Pico de Amperaje',...cl.slice(0,3)];
+              const valorPico = Math.max(picoPrev, t.amperaje.actual);
+              ca={activa:true,tipo:'peak_shaving',mensaje:`Pico previsto de ${valorPico.toFixed(0)}A adelante. Pre-ajustar profundidad.`,countdown:3,max_countdown:3};
+              cl=[`IA: Pico previsto ${valorPico.toFixed(0)}A — anticipando ajuste`,...cl.slice(0,3)];
               
               // Pausar simulación cuando aparece alerta
               try {
@@ -291,6 +309,7 @@ export default function App() {
   };
 
   const handleAceptarAjuste = () => {
+    alertCooldownRef.current = 5; // evita re-disparo mientras cruza la zona advertida
     setData(prev => ({
       ...prev,
       alerta: { ...prev.alerta, activa: false },
@@ -309,6 +328,7 @@ export default function App() {
   };
 
   const handleRechazarAjuste = () => {
+    alertCooldownRef.current = 5; // evita re-disparo mientras cruza la zona advertida
     setData(prev => ({
       ...prev,
       alerta: { ...prev.alerta, activa: false },
@@ -324,7 +344,21 @@ export default function App() {
   };
 
   // Preparar datos para las gráficas
-  const chartData = data.historial_amperaje.map((val, idx) => ({ time: idx, Amp: val }));
+  // Serie real (historial) + serie prevista (predicción IA) en un eje de tiempo continuo.
+  const histLen = data.historial_amperaje.length;
+  const pred = data.prediccion?.amperajes ?? [];
+  const chartData: { time: number; Amp?: number; Previsto?: number }[] =
+    data.historial_amperaje.map((val, idx) => ({ time: idx, Amp: val }));
+  // Punto de unión: la predicción arranca desde el último valor real para que las líneas se toquen.
+  if (histLen > 0 && pred.length > 0) {
+    chartData[histLen - 1].Previsto = data.historial_amperaje[histLen - 1];
+    pred.forEach((amp, i) => {
+      chartData.push({ time: histLen + i, Previsto: amp });
+    });
+  }
+  const picoPrevisto = data.prediccion?.picoPrevisto ?? 0;
+  const preajusteActivo = data.prediccion?.preajuste ?? false;
+  const prediccionActiva = pred.length > 0;
 
   // --- Núcleo IA: redistribución de energía en tiempo real ---
   // El factor de carga se deriva de qué tan por encima del óptimo está el amperaje.
@@ -544,6 +578,7 @@ export default function App() {
                   <span className="flex items-center"><span className="w-2 h-2 mr-1" style={{backgroundColor: '#367C2B', opacity: 0.5}}></span> 70-85A</span>
                   <span className="flex items-center"><span className="w-2 h-2 mr-1" style={{backgroundColor: '#FFDE00', opacity: 0.6}}></span> 85-100A</span>
                   <span className="flex items-center"><span className="w-2 h-2 mr-1" style={{backgroundColor: '#cc0000', opacity: 0.7}}></span> &gt;100A</span>
+                  <span className="flex items-center ml-1 pl-2 border-l border-gray-200"><span className="w-2 h-2 mr-1 border-2 border-dashed" style={{borderColor: '#38bdf8'}}></span> Escaneo IA</span>
                 </span>
               </div>
             </h2>
@@ -564,6 +599,11 @@ export default function App() {
 
                       const key = `${x},${y}`;
                       const currentAmp = historial[key];
+                      // NÚCLEO IA: ¿celda en la ventana de escaneo predictivo?
+                      const scanIdx = data.prediccion?.celdas?.findIndex(c => c.x === x && c.y === y) ?? -1;
+                      const isScan = scanIdx >= 0 && currentAmp === undefined;
+                      const scanAmp = isScan ? (data.prediccion?.amperajes?.[scanIdx] ?? 0) : 0;
+                      const scanPeligro = scanAmp > data.amperaje.maximo;
                       let overlay = null;
                       
                       if (currentAmp !== undefined) {
@@ -589,6 +629,20 @@ export default function App() {
                       return (
                         <div key={`${y}-${x}`} className="border border-white/50 relative transition-colors duration-1000" style={{backgroundColor: bgColor}}>
                           {overlay}
+                          {/* NÚCLEO IA: marco de escaneo predictivo sobre celdas futuras */}
+                          {isScan && (
+                            <div
+                              className="absolute inset-0 z-5 pointer-events-none flex items-start justify-end"
+                              style={{
+                                border: `2px dashed ${scanPeligro ? '#cc0000' : '#38bdf8'}`,
+                                boxShadow: `inset 0 0 6px ${scanPeligro ? 'rgba(204,0,0,0.5)' : 'rgba(56,189,248,0.4)'}`
+                              }}
+                            >
+                              <span className="text-[8px] font-bold leading-none px-0.5" style={{ backgroundColor: scanPeligro ? '#cc0000' : '#38bdf8', color: '#fff' }}>
+                                {scanAmp.toFixed(0)}
+                              </span>
+                            </div>
+                          )}
                           {/* Punto del tractor */}
                           {data.tractor_pos.x === x && data.tractor_pos.y === y && (
                             <div className="absolute inset-0 flex items-center justify-center z-10">
@@ -605,8 +659,20 @@ export default function App() {
 
           {/* GRÁFICA DE AMPERAJE */}
           <div className="bg-white p-4 shadow-sm h-64">
-            <h2 className="text-sm font-bold uppercase text-gray-500 mb-2 tracking-wider">Historial de Amperaje (Peak Shaving)</h2>
-            <ResponsiveContainer width="100%" height="85%">
+            <h2 className="text-sm font-bold uppercase text-gray-500 mb-2 tracking-wider flex justify-between items-center">
+              <span>Historial y Predicción de Amperaje</span>
+              {prediccionActiva && (
+                <span className="flex items-center gap-3 normal-case tracking-normal">
+                  <span className="flex items-center gap-1 text-[10px] font-bold text-gray-500">
+                    <span className="w-4 h-0.5 bg-[#1A1A1A] inline-block"></span> Real
+                  </span>
+                  <span className="flex items-center gap-1 text-[10px] font-bold text-[#0284c7]">
+                    <span className="w-4 h-0 border-t-2 border-dashed border-[#38bdf8] inline-block"></span> Previsto IA
+                  </span>
+                </span>
+              )}
+            </h2>
+            <ResponsiveContainer width="100%" height="80%">
               <LineChart data={chartData} margin={{ top: 5, right: 5, left: -20, bottom: 0 }}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#EEE" />
                 <XAxis dataKey="time" hide />
@@ -614,9 +680,26 @@ export default function App() {
                 <Tooltip contentStyle={{fontWeight: 'bold', borderRadius: '0.5rem', border: 'none'}} />
                 {/* Banda sombreada verde indicando zona óptima */}
                 <ReferenceArea y1={65} y2={85} fill="#367C2B" fillOpacity={0.1} />
-                <Line type="monotone" dataKey="Amp" stroke="#1A1A1A" strokeWidth={3} dot={{r:3, fill: '#FFDE00', strokeWidth: 2}} isAnimationActive={false} />
+                {/* Línea de límite máximo */}
+                <ReferenceLine y={data.amperaje.maximo} stroke="#cc0000" strokeDasharray="4 4" strokeWidth={1.5} />
+                {/* Serie prevista por la IA (punteada, hacia adelante) */}
+                <Line type="monotone" dataKey="Previsto" stroke="#38bdf8" strokeWidth={2.5} strokeDasharray="5 4" dot={{r:2, fill:'#38bdf8'}} isAnimationActive={false} connectNulls />
+                {/* Serie real */}
+                <Line type="monotone" dataKey="Amp" stroke="#1A1A1A" strokeWidth={3} dot={{r:3, fill: '#FFDE00', strokeWidth: 2}} isAnimationActive={false} connectNulls />
               </LineChart>
             </ResponsiveContainer>
+            {/* Aviso predictivo */}
+            {prediccionActiva && picoPrevisto > data.amperaje.maximo ? (
+              <div className="mt-1 text-[11px] text-[#0284c7] font-bold flex items-center gap-1">
+                <span className="w-2 h-2 rounded-full bg-[#38bdf8] animate-pulse"></span>
+                IA anticipa pico de {picoPrevisto.toFixed(0)}A adelante{preajusteActivo ? ' · pre-ajustando profundidad' : ''}.
+              </div>
+            ) : prediccionActiva ? (
+              <div className="mt-1 text-[11px] text-gray-400 font-bold flex items-center gap-1">
+                <span className="w-2 h-2 rounded-full bg-[#7db356]"></span>
+                Terreno despejado en los próximos metros.
+              </div>
+            ) : null}
           </div>
 
         </section>
