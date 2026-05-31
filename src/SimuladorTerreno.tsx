@@ -77,6 +77,9 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
   const [animSpeed, setAnimSpeed] = useState(3000); // 2000 lento, 1000 normal, 500 rapido
 
   const historyAmpArr = useRef<number[]>([]);
+  // Bandera: el primer tick procesa la celda inicial (0,0) sin moverse,
+  // para que no se "salte" la primera celda del recorrido.
+  const startedRef = useRef(false);
 
   // NÚCLEO IA: última predicción para visualización (celdas escaneadas, pico previsto)
   const [prediccion, setPrediccion] = useState<{
@@ -106,6 +109,7 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
       });
       historyAmpArr.current = [];
       setPrediccion(null);
+      startedRef.current = false;
     }
   }, [mapSize, simState]);
 
@@ -173,14 +177,19 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
   const stepSimulation = useCallback(() => {
     setTractorPos(prev => {
       let { x, y } = prev;
-      
-      const isEvenRow = y % 2 === 0;
-      if (isEvenRow) {
-        if (x < mapSize - 1) x++;
-        else y++;
+
+      // El primer tick procesa la celda inicial sin moverse; los demas avanzan.
+      if (!startedRef.current) {
+        startedRef.current = true;
       } else {
-        if (x > 0) x--;
-        else y++;
+        const isEvenRow = y % 2 === 0;
+        if (isEvenRow) {
+          if (x < mapSize - 1) x++;
+          else y++;
+        } else {
+          if (x > 0) x--;
+          else y++;
+        }
       }
 
       if (y >= mapSize) {
