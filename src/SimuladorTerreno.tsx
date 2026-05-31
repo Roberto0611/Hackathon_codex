@@ -226,6 +226,7 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
           amperaje: { actual: stats.amperajeActual, optimo: 75, maximo: paramMaxI },
           profundidad: { actual: stats.profundidadActual, recomendada: paramD },
           velocidad: paramV,
+          rpm: 0,
           ajustes_automaticos: stats.ajustes,
           kwh_ahorrados: parseFloat(stats.kwhAhorrados.toFixed(2)),
           bateria: { 
@@ -335,13 +336,18 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
       // Horas = Batería restante (kWh) / Consumo promedio (kW)
       const consumoPromedioKw = kW; // Consumo actual en kW
       const horasRestantes = newBat > 0 ? newBat / Math.max(0.1, consumoPromedioKw) : 0;
-      
+
+      // RPM del motor: base proporcional a la velocidad + componente por carga.
+      // Rango realista de un motor electrico de tractor en trabajo (~900-2300 rpm).
+      const rpm = Math.round(900 + (paramV / 12) * 900 + (amperaje / paramMaxI) * 500);
+
       const newState = {
         parcelaCompletada: false,
         posicion: { x, y },
         amperaje: { actual: amperaje, optimo: 75, maximo: paramMaxI },
         profundidad: { actual: d_current, recomendada: paramD },
         velocidad: paramV,
+        rpm,
         ajustes_automaticos: newAj,
         kwh_ahorrados: parseFloat(newAhorros.toFixed(2)),
         bateria: { 
