@@ -548,19 +548,22 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
           {/* BOTONES DE CONTROL */}
           <div className="flex gap-2 mt-auto pt-4 border-t border-gray-100">
             {simState === 'IDLE' || simState === 'PAUSED' ? (
-              <button className="flex-1 bg-[#367C2B] hover:bg-[#2b6322] text-white font-bold py-2 px-4 rounded shadow transition-colors" 
+              <button className="flex-1 bg-[#367C2B] hover:bg-[#2b6322] text-white font-bold py-2 px-4 rounded shadow transition-colors flex items-center justify-center gap-2 uppercase tracking-wide text-sm"
                 onClick={() => setSimState('RUNNING')}>
-                ▶ {simState === 'IDLE' ? 'INICIAR SIMULACIÓN' : 'REANUDAR'}
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><polygon points="6 4 20 12 6 20 6 4"/></svg>
+                {simState === 'IDLE' ? 'Iniciar simulación' : 'Reanudar'}
               </button>
             ) : (
-              <button className="flex-1 bg-[#FFDE00] hover:bg-[#e6c800] text-[#1A1A1A] font-bold py-2 px-4 rounded shadow transition-colors" 
+              <button className="flex-1 bg-[#FFDE00] hover:bg-[#e6c800] text-[#1A1A1A] font-bold py-2 px-4 rounded shadow transition-colors flex items-center justify-center gap-2 uppercase tracking-wide text-sm"
                 onClick={() => setSimState('PAUSED')}>
-                ⏸ PAUSAR
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+                Pausar
               </button>
             )}
-            <button className="bg-gray-400 hover:bg-gray-500 text-white font-bold py-2 px-4 rounded shadow transition-colors"
+            <button className="bg-white border border-gray-300 hover:bg-gray-100 text-gray-700 font-bold py-2 px-4 rounded transition-colors flex items-center justify-center gap-2 uppercase tracking-wide text-sm"
                 onClick={() => { setSimState('IDLE'); limpiarGrid(); }}>
-              ⏹ RESET
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="currentColor"><rect x="6" y="6" width="12" height="12" rx="1"/></svg>
+              Reset
             </button>
           </div>
         </div>
@@ -568,110 +571,132 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
 
       {/* ANIMACION Y STATS ESTADO */}
       <div className="flex flex-col md:flex-row gap-4">
-        {/* Velocidad animacion */}
-        <div className="flex-none bg-white p-4 rounded-lg shadow-sm border border-gray-100 w-full md:w-1/3">
-          <h3 className="font-bold text-[#1A1A1A] mb-3">Velocidad de Simulación</h3>
-          <div className="flex gap-2">
-            {[ { k: 1000, label: 'Lento' }, { k: 333, label: 'Normal' }, { k: 100, label: 'Rápido' } ].map(s => (
-              <button key={s.k} onClick={() => setAnimSpeed(s.k)}
-                className={`flex-1 py-1 rounded border font-semibold text-xs ${animSpeed === s.k ? 'bg-blue-100 border-blue-400 text-blue-800' : 'bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100'}`}>
-                {s.label}
-              </button>
-            ))}
-          </div>
-          
-          {/* Indicador de pausa por alerta */}
-          {simState === 'PAUSED' && (
-            <div className="mt-3 p-2 bg-yellow-50 border-l-4 border-[#FFDE00] rounded">
-              <div className="flex items-center gap-2">
-                <span className="text-xl">⏸</span>
+        {/* Columna izquierda: control de simulación + visión IA */}
+        <div className="flex-none w-full md:w-2/5 flex flex-col gap-4">
+          {/* Velocidad animacion */}
+          <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-100">
+            <h3 className="text-xs font-bold uppercase tracking-wider text-gray-500 mb-3">Velocidad de Simulación</h3>
+            <div className="flex gap-2">
+              {[ { k: 1000, label: 'Lento' }, { k: 333, label: 'Normal' }, { k: 100, label: 'Rápido' } ].map(s => (
+                <button key={s.k} onClick={() => setAnimSpeed(s.k)}
+                  className={`flex-1 py-2 rounded border font-semibold text-xs transition-colors ${animSpeed === s.k ? 'bg-[#367C2B] border-[#367C2B] text-white' : 'bg-white border-gray-200 text-gray-600 hover:border-gray-300'}`}>
+                  {s.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Indicador de pausa por alerta */}
+            {simState === 'PAUSED' && (
+              <div className="mt-3 p-3 bg-[#FFFBEB] border-l-4 border-[#FFDE00] rounded-r flex items-center gap-3">
+                <div className="w-8 h-8 rounded-full bg-[#FFDE00] flex items-center justify-center shrink-0">
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="#1A1A1A"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+                </div>
                 <div className="text-xs">
-                  <div className="font-bold text-[#1A1A1A]">Pausado por Alerta</div>
-                  <div className="text-gray-600">Esperando decisión del operador...</div>
+                  <div className="font-bold text-[#1A1A1A]">Pausado por alerta</div>
+                  <div className="text-gray-500">Esperando decisión del operador</div>
                 </div>
               </div>
-            </div>
-          )}
+            )}
+          </div>
 
           {/* NÚCLEO IA: Visión predictiva del terreno */}
-          <div className="mt-3 p-3 bg-[#0f1f2e] rounded border border-[#1e3a52]">
-            <div className="flex items-center justify-between mb-2">
-              <span className="text-[10px] font-bold uppercase tracking-wide text-[#38bdf8]">Visión IA · Escaneo</span>
-              <span className="text-[10px] text-gray-400">+{LOOKAHEAD} celdas</span>
+          <div className="bg-white p-4 rounded-lg shadow-sm border border-gray-100 border-t-4 border-t-[#367C2B]">
+            <div className="flex items-center justify-between mb-3">
+              <div>
+                <h3 className="text-xs font-bold uppercase tracking-wider text-gray-500">Visión Predictiva</h3>
+                <p className="text-[10px] text-gray-400 uppercase tracking-wide">Núcleo IA · Escaneo del terreno</p>
+              </div>
+              <span className="text-[10px] font-bold text-gray-400 bg-gray-100 px-2 py-1 rounded">+{LOOKAHEAD} celdas</span>
             </div>
             {prediccion && prediccion.amperajes.length > 0 ? (
               <>
                 {/* Mini-barras de amperaje previsto en próximas celdas */}
-                <div className="flex items-end gap-1 h-12 mb-2">
+                <div className="flex items-end gap-2 h-20 mb-3">
                   {prediccion.amperajes.map((amp, i) => {
                     const peligro = amp > paramMaxI;
                     const h = Math.min(100, (amp / (paramMaxI * 1.3)) * 100);
                     return (
                       <div key={i} className="flex-1 flex flex-col items-center justify-end h-full">
-                        <span className="text-[8px] font-bold mb-0.5" style={{ color: peligro ? '#f87171' : '#38bdf8' }}>{amp.toFixed(0)}</span>
-                        <div className="w-full rounded-sm transition-all duration-300" style={{ height: `${h}%`, backgroundColor: peligro ? '#cc0000' : '#38bdf8' }}></div>
+                        <span className="text-[10px] font-bold mb-1" style={{ color: peligro ? '#cc0000' : '#367C2B' }}>{amp.toFixed(0)}A</span>
+                        <div className="w-full rounded-t transition-all duration-300" style={{ height: `${h}%`, backgroundColor: peligro ? '#cc0000' : '#367C2B' }}></div>
+                        <span className="text-[9px] text-gray-400 mt-1">+{i + 1}</span>
                       </div>
                     );
                   })}
                 </div>
-                <div className="text-[10px] text-gray-300 leading-snug">
+                <div className="border-t border-gray-100 pt-3">
                   {prediccion.picoPrevisto > paramMaxI ? (
-                    <span>
-                      <span className="text-[#f87171] font-bold">Pico previsto {prediccion.picoPrevisto.toFixed(0)}A</span> · pre-ajustando profundidad a <span className="text-[#FFDE00] font-bold">{prediccion.dObjetivo.toFixed(0)}cm</span> antes de llegar.
-                    </span>
+                    <p className="text-xs text-gray-600 leading-snug">
+                      <span className="font-bold text-[#cc0000]">Pico previsto {prediccion.picoPrevisto.toFixed(0)}A.</span> Pre-ajustando profundidad a <span className="font-bold text-[#1A1A1A]">{prediccion.dObjetivo.toFixed(0)}cm</span> antes de llegar.
+                    </p>
                   ) : (
-                    <span className="text-[#7db356]">Terreno despejado adelante. Operando a profundidad recomendada.</span>
+                    <p className="text-xs text-[#367C2B] font-medium leading-snug">
+                      Terreno despejado adelante. Operando a profundidad recomendada.
+                    </p>
                   )}
                 </div>
               </>
             ) : (
-              <p className="text-[10px] text-gray-500">Inicia la simulación para activar el escaneo predictivo del terreno.</p>
+              <p className="text-xs text-gray-400 py-4 text-center">Inicia la simulación para activar el escaneo predictivo del terreno.</p>
             )}
           </div>
         </div>
 
-        {/* Live stats */}
-        <div className="grow bg-[#1A1A1A] p-4 rounded-lg shadow-sm text-gray-300 font-mono text-xs flex flex-wrap gap-4">
-          <div className="w-1/3 min-w-[120px]">
-            <span className="text-gray-500 block mb-1">AMPERAJE ACTUAL</span>
-            <span className={`text-2xl font-bold ${stats.amperajeActual > paramMaxI ? 'text-red-500' : 'text-[#FFDE00]'}`}>
-              {stats.amperajeActual.toFixed(2)} A
-            </span>
+        {/* Live stats: tarjetas claras */}
+        <div className="grow bg-white p-4 rounded-lg shadow-sm border border-gray-100">
+          <h3 className="text-xs font-bold uppercase tracking-wider text-gray-500 mb-3">Telemetría en Vivo</h3>
+          <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
+            {/* Amperaje */}
+            <div className="bg-[#F5F5F5] rounded-md p-3">
+              <span className="text-[10px] uppercase tracking-wide text-gray-500 font-bold block mb-1">Amperaje actual</span>
+              <span className={`text-2xl font-bold ${stats.amperajeActual > paramMaxI ? 'text-[#cc0000]' : 'text-[#1A1A1A]'}`}>
+                {stats.amperajeActual.toFixed(1)}<span className="text-sm font-semibold text-gray-400 ml-1">A</span>
+              </span>
+            </div>
+            {/* Profundidad */}
+            <div className="bg-[#F5F5F5] rounded-md p-3">
+              <span className="text-[10px] uppercase tracking-wide text-gray-500 font-bold block mb-1">Profundidad</span>
+              <div className="flex items-baseline gap-2">
+                <span className="text-2xl font-bold text-[#1A1A1A]">{stats.profundidadActual}<span className="text-sm font-semibold text-gray-400 ml-1">cm</span></span>
+                {stats.profundidadActual < stats.recomendada && <span className="text-[9px] font-bold text-[#367C2B] uppercase">Ajustada</span>}
+              </div>
+            </div>
+            {/* Avance */}
+            <div className="bg-[#F5F5F5] rounded-md p-3">
+              <span className="text-[10px] uppercase tracking-wide text-gray-500 font-bold block mb-1">Avance</span>
+              <span className="text-2xl font-bold text-[#1A1A1A]">{Math.round((visitedCells / totalCells) * 100)}<span className="text-sm font-semibold text-gray-400 ml-0.5">%</span></span>
+              <span className="text-[10px] text-gray-400 ml-1">({visitedCells}/{totalCells})</span>
+            </div>
+            {/* Overloads */}
+            <div className="bg-[#F5F5F5] rounded-md p-3">
+              <span className="text-[10px] uppercase tracking-wide text-gray-500 font-bold block mb-1">Overloads</span>
+              <span className="text-2xl font-bold text-[#cc0000]">{stats.ajustes}</span>
+              <span className="text-[10px] text-gray-400 ml-1">reactivos</span>
+            </div>
+            {/* Pre-ajustes IA */}
+            <div className="bg-[#F5F5F5] rounded-md p-3">
+              <span className="text-[10px] uppercase tracking-wide text-gray-500 font-bold block mb-1">Pre-ajustes IA</span>
+              <span className="text-2xl font-bold text-[#367C2B]">{stats.preajustes}</span>
+              <span className="text-[10px] text-gray-400 ml-1">anticipados</span>
+            </div>
+            {/* Energía */}
+            <div className="bg-[#F5F5F5] rounded-md p-3">
+              <span className="text-[10px] uppercase tracking-wide text-gray-500 font-bold block mb-1">Energía usada</span>
+              <span className="text-2xl font-bold text-[#1A1A1A]">{stats.kwhAcumulados.toFixed(2)}<span className="text-sm font-semibold text-gray-400 ml-1">kWh</span></span>
+            </div>
           </div>
-          <div className="w-1/3 min-w-[120px]">
-            <span className="text-gray-500 block mb-1">PROFUNDIDAD (d)</span>
-            <span className="text-2xl font-bold text-white">
-              {stats.profundidadActual} <span className="text-sm font-normal">cm</span>
-            </span>
-            {stats.profundidadActual < stats.recomendada && <span className="ml-2 text-yellow-400 text-[10px]">Peak Shaved</span>}
-          </div>
-          <div className="w-1/3 min-w-[120px]">
-            <span className="text-gray-500 block mb-1">AVANCE</span>
-            <span className="text-2xl font-bold text-white">
-              {Math.round((visitedCells / totalCells) * 100)}%
-            </span>
-            <span className="ml-2">({visitedCells}/{totalCells})</span>
-          </div>
-          <div className="w-1/3 min-w-[120px]">
-            <span className="text-gray-500 block mb-1">OVERLOADS REGISTRADOS</span>
-            <span className="text-xl font-bold text-red-400">{stats.ajustes} eventos</span>
-          </div>
-          <div className="w-1/3 min-w-[120px]">
-            <span className="text-gray-500 block mb-1">PRE-AJUSTES IA</span>
-            <span className="text-xl font-bold text-[#38bdf8]">{stats.preajustes} anticipados</span>
-          </div>
-          <div className="w-1/3 min-w-[120px]">
-            <span className="text-gray-500 block mb-1">ENERGÍA (ESTIMADA)</span>
-            <span className="text-xl font-bold text-[#7db356]">{stats.kwhAcumulados.toFixed(2)} kWh</span>
-          </div>
-          <div className="w-1/3 min-w-[120px]">
-            <span className="text-gray-500 block mb-1">BATERÍA RESTANTE</span>
-            <span className={`text-xl font-bold ${stats.bateria < 10 ? 'text-red-500 animate-pulse' : stats.bateria < 20 ? 'text-yellow-400' : 'text-[#367C2B]'}`}>
-              {stats.bateria.toFixed(2)} kWh
-            </span>
-            <div className="w-full h-2 bg-gray-700 rounded-full overflow-hidden mt-1">
-              <div 
-                className={`h-full transition-all duration-300 ${stats.bateria < 10 ? 'bg-red-500' : stats.bateria < 20 ? 'bg-yellow-400' : 'bg-[#367C2B]'}`}
+
+          {/* Batería restante: barra ancha */}
+          <div className="mt-3 bg-[#F5F5F5] rounded-md p-3">
+            <div className="flex justify-between items-center mb-2">
+              <span className="text-[10px] uppercase tracking-wide text-gray-500 font-bold">Batería restante</span>
+              <span className={`text-lg font-bold ${stats.bateria < 10 ? 'text-[#cc0000]' : stats.bateria < 20 ? 'text-[#b58900]' : 'text-[#367C2B]'}`}>
+                {stats.bateria.toFixed(1)} <span className="text-xs font-semibold text-gray-400">/ 50 kWh</span>
+              </span>
+            </div>
+            <div className="w-full h-2.5 bg-gray-200 rounded-full overflow-hidden">
+              <div
+                className={`h-full transition-all duration-300 ${stats.bateria < 10 ? 'bg-[#cc0000]' : stats.bateria < 20 ? 'bg-[#FFDE00]' : 'bg-[#367C2B]'}`}
                 style={{ width: `${(stats.bateria / 50) * 100}%` }}
               ></div>
             </div>

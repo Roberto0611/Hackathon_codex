@@ -1,0 +1,522 @@
+% ============================================================
+%  FieldSense / EV Peak Shaver
+%  Documentacion Tecnica para Pitch
+%  Hackathon John Deere x Tec de Monterrey - Reto 02
+%
+%  INSTRUCCIONES: Copiar este contenido completo en un proyecto
+%  nuevo de Overleaf (documento .tex). Compilar con pdfLaTeX.
+% ============================================================
+
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish,es-nodecimaldot]{babel}
+\usepackage{amsmath,amssymb}
+\usepackage{geometry}
+\geometry{margin=2.5cm}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{tcolorbox}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{hyperref}
+
+% --- Identidad visual John Deere ---
+\definecolor{jdgreen}{HTML}{367C2B}
+\definecolor{jdyellow}{HTML}{FFDE00}
+\definecolor{jddark}{HTML}{1A1A1A}
+
+\hypersetup{colorlinks=true, linkcolor=jdgreen, urlcolor=jdgreen}
+
+\titleformat{\section}{\Large\bfseries\color{jdgreen}}{\thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries\color{jddark}}{\thesubsection}{1em}{}
+
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\color{jdgreen}\textbf{FieldSense}}
+\rhead{Reto 02 - Maquinas Electrificadas}
+\cfoot{\thepage}
+
+% Caja para "como defenderlo"
+\newtcolorbox{defensa}{colback=jdgreen!8,colframe=jdgreen,boxrule=0.8pt,
+  left=6pt,right=6pt,top=4pt,bottom=4pt}
+
+% Caja para advertencias / honestidad tecnica
+\newtcolorbox{alerta}{colback=jdyellow!20,colframe=jdyellow!80!black,boxrule=0.8pt,
+  left=6pt,right=6pt,top=4pt,bottom=4pt}
+
+\begin{document}
+
+% ============================================================
+\begin{titlepage}
+\centering
+\vspace*{2cm}
+{\Huge\bfseries\color{jdgreen} FieldSense\par}
+\vspace{0.4cm}
+{\Large EV Peak Shaver: gestion electrica predictiva\\ tractor--implemento\par}
+\vspace{1.5cm}
+{\large Documentacion tecnica y guia de defensa\par}
+\vspace{0.5cm}
+{\large Hackathon John Deere $\times$ Tec de Monterrey\par}
+{\large Reto 02: Maquinas Electrificadas\par}
+\vfill
+{\itshape ``El PTO mueve potencia. La electricidad mueve decisiones.''\par}
+\vfill
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Resumen ejecutivo}
+
+FieldSense es un sistema de gestion de energia para implementos agricolas
+electrificados. Resuelve la tension central del reto: la electrificacion
+habilita control fino y precision, pero exige energia en jornadas largas y
+remotas donde no puede haber paros.
+
+El sistema opera en tres fases:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Pre-jornada (Planificador):} antes de arrancar, la IA simula
+  el lote completo contra la bateria disponible y determina si la jornada es
+  viable; si no, propone un plan adaptativo de profundidad por zona.
+  \item \textbf{Durante (Control predictivo + Prioridades de energia):} la IA
+  escanea el terreno por delante, anticipa picos de demanda y pre-ajusta la
+  profundidad antes de llegar; ademas redistribuye los kW disponibles entre
+  subsistemas segun una jerarquia de prioridades.
+  \item \textbf{Post-jornada (Reporte):} cuantifica en pesos y minutos las
+  perdidas evitadas (energia, tiempo improductivo y rendimiento).
+\end{enumerate}
+
+% ============================================================
+\section{Modelo fisico}
+
+El nucleo del sistema es un modelo fisico simplificado que relaciona las
+propiedades del suelo y la configuracion del implemento con la demanda
+electrica instantanea. Todas las decisiones de la IA se derivan de este modelo.
+
+\subsection{Variables}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{clc}
+\toprule
+\textbf{Simbolo} & \textbf{Descripcion} & \textbf{Unidad} \\
+\midrule
+$k$        & Coeficiente de resistencia del suelo & adimensional \\
+$a$        & Ancho de trabajo del implemento      & m \\
+$d$        & Profundidad de trabajo               & cm \\
+$n$        & Numero de cuerpos del implemento     & --- \\
+$v$        & Velocidad de avance                  & km/h \\
+$\eta$     & Eficiencia de la transmision         & (0--1) \\
+$V$        & Voltaje del bus del sistema          & V \\
+$I$        & Amperaje (corriente) demandado       & A \\
+$I_{max}$  & Amperaje maximo permitido            & A \\
+$P$        & Potencia demandada                   & W \\
+\bottomrule
+\end{tabular}
+\caption{Variables del modelo y sus unidades.}
+\end{table}
+
+\subsection{Coeficientes de resistencia del suelo}
+
+Cada tipo de terreno tiene un coeficiente $k$ que representa la resistencia
+mecanica que opone al implemento. Estos valores son los que un mapa de suelo
+(de pasadas previas o sensores) alimentaria al sistema:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lc}
+\toprule
+\textbf{Tipo de suelo} & \textbf{$k$} \\
+\midrule
+Seco        & 15 \\
+Hierba      & 20 \\
+Normal      & 30 \\
+Lodo        & 80 \\
+Piedra      & 110 \\
+Inundado    & 120 \\
+\bottomrule
+\end{tabular}
+\caption{Coeficientes de resistencia por tipo de suelo.}
+\end{table}
+
+\subsection{Ecuaciones fundamentales}
+
+\textbf{1. Fuerza / resistencia total.} La resistencia que opone el suelo es
+proporcional al coeficiente $k$, al ancho de trabajo, a la profundidad y al
+numero de cuerpos. Convirtiendo la profundidad a metros ($d/100$) y escalando
+a Newtons:
+
+\begin{equation}
+R = k \cdot a \cdot \frac{d}{100} \cdot n \cdot 1000 \quad [\text{N}]
+\end{equation}
+
+\textbf{2. Potencia demandada.} La potencia es la fuerza por la velocidad
+lineal, ajustada por la eficiencia de la transmision. La velocidad se convierte
+de km/h a m/s ($v/3.6$):
+
+\begin{equation}
+P = \frac{R \cdot \dfrac{v}{3.6}}{\eta} \quad [\text{W}]
+\end{equation}
+
+\textbf{3. Amperaje (corriente).} A partir de la potencia y el voltaje del bus:
+
+\begin{equation}
+I = \frac{P}{V} \quad [\text{A}]
+\end{equation}
+
+\textbf{Forma compacta.} Sustituyendo, el amperaje en funcion de la
+profundidad queda:
+
+\begin{equation}
+I(d) = \frac{k \cdot a \cdot n \cdot 1000 \cdot \dfrac{v}{3.6}}{\eta \cdot V} \cdot \frac{d}{100}
+\label{eq:compacta}
+\end{equation}
+
+\begin{tcolorbox}[colback=jddark!5,colframe=jddark,boxrule=0.6pt]
+\textbf{Observacion clave.} El amperaje $I$ es \emph{lineal} respecto a la
+profundidad $d$. Esto es lo que hace que el control sea analiticamente
+resoluble (no requiere busqueda iterativa) y por tanto rapido y deterministico.
+\end{tcolorbox}
+
+\subsection{Profundidad segura (despeje directo)}
+
+Como $I(d)$ es lineal, podemos despejar la profundidad maxima que mantiene el
+amperaje justo en el limite $I_{max}$. Definimos el coeficiente:
+
+\begin{equation}
+c = \frac{k \cdot a \cdot n \cdot 1000 \cdot \dfrac{v}{3.6}}{\eta \cdot V \cdot 100}
+\qquad\Longrightarrow\qquad I = c \cdot d
+\end{equation}
+
+Y la profundidad segura se obtiene directamente:
+
+\begin{equation}
+d_{segura} = \frac{I_{max}}{c}
+\label{eq:safedepth}
+\end{equation}
+
+Esta es la ecuacion central del control: \textbf{dado un suelo, la IA calcula
+en un paso a que profundidad debe trabajar para no exceder el limite electrico},
+sin prueba y error.
+
+\subsection{Consumo de energia}
+
+La energia consumida por celda (asumiendo 1 celda $=$ 1 metro de avance) es la
+potencia por el tiempo de recorrido:
+
+\begin{equation}
+t_{celda} = \frac{0.001}{v} \quad [\text{h}], \qquad
+P_{kW} = \frac{I \cdot V}{1000}
+\end{equation}
+
+\begin{equation}
+E_{celda} = P_{kW} \cdot t_{celda} \cdot \beta \quad [\text{kWh}]
+\end{equation}
+
+\begin{alerta}
+\textbf{Nota de honestidad tecnica (importante para el Q\&A).} El factor
+$\beta = 8$ es un \emph{multiplicador de demostracion} que acelera el consumo
+de bateria para que el efecto sea visible en los segundos que dura la demo. En
+una unidad real $\beta = 1$. Si preguntan por consumos ``altos'', esta es la
+explicacion honesta: los valores absolutos estan amplificados a proposito; lo
+que importa es la \emph{diferencia relativa} entre operar con y sin el sistema.
+\end{alerta}
+
+% ============================================================
+\section{Como funciona la prediccion}
+
+\begin{tcolorbox}[colback=jdyellow!20,colframe=jdyellow!80!black,boxrule=0.8pt]
+\textbf{Aclaracion fundamental.} La prediccion \textbf{NO} es machine learning
+entrenado con lotes anteriores. Es \textbf{Control Predictivo basado en Modelo}
+(MPC, \textit{Model Predictive Control}): un metodo de control industrial
+estandar y plenamente defendible. Usa el mapa de resistencia del terreno que
+viene adelante y el modelo fisico para anticipar la demanda.
+\end{tcolorbox}
+
+\subsection{De donde salen los datos del terreno}
+
+El sistema parte de un \textbf{mapa de resistencia del suelo} ($k$ por celda).
+En la vida real, ese mapa proviene de:
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Pasadas previas} del mismo tractor (telemetria historica de
+  amperaje georreferenciada $\rightarrow$ se infiere $k$ por zona).
+  \item \textbf{Sensores en el punto de trabajo} habilitados justamente por la
+  electrificacion (humedad, compactacion, fuerza).
+  \item \textbf{Mapas de suelo} del John Deere Operations Center.
+\end{itemize}
+
+En nuestro prototipo, ese mapa se define en el simulador de terreno; conceptualmente
+representa esa capa de datos.
+
+\subsection{Algoritmo de control predictivo}
+
+En cada paso de avance, el sistema ejecuta:
+
+\begin{enumerate}[leftmargin=*]
+  \item \textbf{Escaneo (lookahead).} Lee las proximas $L = 4$ celdas del mapa
+  segun la trayectoria (patron boustrophedon: ida y vuelta).
+  \item \textbf{Evaluacion.} Para cada celda futura calcula su profundidad
+  segura $d_{segura}$ con la Ecuacion~\eqref{eq:safedepth}.
+  \item \textbf{Objetivo.} Toma la restriccion mas exigente de la ventana:
+  \begin{equation}
+  d_{obj} = \max\left(10,\ \min\left(d_{rec},\ \min_{i \in [1,L]} d_{segura}^{(i)}\right)\right)
+  \end{equation}
+  donde $d_{rec}$ es la profundidad recomendada y 10 cm el piso operativo.
+  \item \textbf{Pre-ajuste gradual.} Mueve la profundidad hacia $d_{obj}$ de
+  forma anticipada, a un maximo de \texttt{EASE\_STEP} $= 2$ cm por paso, de modo
+  que la transicion sea suave y empiece \emph{antes} de llegar al obstaculo.
+  \item \textbf{Salvaguarda reactiva.} Si el terreno excede lo previsto, un lazo
+  de seguridad recorta la profundidad hasta cumplir el limite (peak shaving
+  clasico como respaldo).
+\end{enumerate}
+
+\begin{defensa}
+\textbf{Por que es ``IA central y no decorativa'':} el sistema toma decisiones
+de control autonomas (cuanto bajar la profundidad, cuando, en que zona)
+optimizando un objetivo (maximizar profundidad de trabajo) sujeto a una
+restriccion dura (no exceder $I_{max}$) y a una restriccion global (no agotar la
+bateria). Es un problema de optimizacion con restricciones resuelto en tiempo
+real, no una regla cosmetica.
+\end{defensa}
+
+\subsection{Diferencia: reactivo vs. predictivo}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{p{5.5cm}p{7.5cm}}
+\toprule
+\textbf{Peak shaving reactivo (lo comun)} & \textbf{Control predictivo (FieldSense)} \\
+\midrule
+Detecta el pico cuando \emph{ya} ocurrio ($I > I_{max}$) y recorta. & Anticipa el pico leyendo el terreno por delante y pre-ajusta \emph{antes}. \\
+Genera sobrecargas momentaneas. & Minimiza sobrecargas; transicion suave. \\
+Reacciona celda a celda. & Optimiza sobre una ventana de $L$ celdas. \\
+\bottomrule
+\end{tabular}
+\caption{El sistema usa control predictivo y deja el reactivo solo como salvaguarda.}
+\end{table}
+
+% ============================================================
+\section{Planificador de jornada}
+
+Antes de arrancar, el planificador simula el lote completo y compara dos
+escenarios sobre el \emph{mismo} terreno real definido en el simulador.
+
+\textbf{Escenario A -- Profundidad fija.} Operar todo el lote a la profundidad
+recomendada $d_{rec}$. Energia total:
+\begin{equation}
+E_{fija} = \sum_{z \in zonas} E_{celda}(k_z, d_{rec}) \cdot N_z
+\end{equation}
+donde $N_z$ es el numero de celdas de la zona $z$.
+
+\textbf{Escenario B -- Plan adaptativo (IA).} Cada zona usa su profundidad
+segura:
+\begin{equation}
+E_{plan} = \sum_{z \in zonas} E_{celda}\big(k_z,\ d_{obj,z}\big) \cdot N_z
+\end{equation}
+
+\textbf{Veredictos:}
+\begin{align}
+\text{Cobertura sin gestion} &= \min\left(100,\ \frac{E_{bateria}}{E_{fija}} \cdot 100\right) \%\\[4pt]
+\text{Margen con plan IA} &= \frac{E_{bateria} - E_{plan}}{E_{bateria}} \cdot 100 \%
+\end{align}
+
+Si $E_{fija} > E_{bateria}$ la jornada no es viable a profundidad fija; el
+sistema indica que porcentaje del lote se cubriria y propone el plan adaptativo
+que si la completa, con su margen de bateria resultante.
+
+\begin{defensa}
+\textbf{Defensa:} esto es optimizacion con restriccion de energia ($E \le
+E_{bateria}$). Convierte la electrificacion de un riesgo (``me puedo quedar sin
+bateria a medio campo'') en una decision informada \emph{antes} de gastar horas
+de jornada. Ataca directamente el dolor del agricultor que opera lejos de la red.
+\end{defensa}
+
+% ============================================================
+\section{Sistema de prioridades de energia}
+
+Cuando la demanda total supera la potencia sostenible del bus ($P_{bus}$), la IA
+redistribuye los kW disponibles segun una jerarquia de prioridades, garantizando
+la continuidad operativa.
+
+\begin{table}[h]
+\centering
+\begin{tabular}{clc}
+\toprule
+\textbf{Prioridad} & \textbf{Subsistema} & \textbf{Politica} \\
+\midrule
+P1 & Sensores y control      & Nunca se reduce (100\%) \\
+P2 & Traccion                & Se mantiene; se toca solo en extremo \\
+P2 & Motor elevador          & Se mantiene; se toca solo en extremo \\
+P3 & Hidraulica auxiliar     & Reducible \\
+P3 & Confort de cabina       & Reducible \\
+\bottomrule
+\end{tabular}
+\caption{Jerarquia de prioridades de subsistemas.}
+\end{table}
+
+\textbf{Algoritmo de reparto.} Sea el deficit $D = \sum_i P_{dem,i} - P_{bus}$.
+Si $D > 0$, se recorta primero el grupo P3 (hasta su piso minimo), y solo si el
+deficit persiste, el grupo P2. P1 jamas se reduce. El recorte dentro de un grupo
+es proporcional al margen disponible de cada subsistema:
+\begin{equation}
+P_{asig,i} = P_{dem,i} - D_{grupo} \cdot \frac{P_{asig,i} - P_{piso,i}}{\sum_j (P_{asig,j} - P_{piso,j})}
+\end{equation}
+
+\begin{defensa}
+\textbf{Defensa:} resuelve la Tension 1 del reto (potencia vs. control). Garantiza
+que la inteligencia del implemento (sensores, control) nunca se apague aunque la
+demanda mecanica se dispare. Da a los fabricantes de implementos una regla clara
+de prioridad sobre la plataforma John Deere.
+\end{defensa}
+
+% ============================================================
+\section{Reporte de eficiencia (impacto economico)}
+
+Al cerrar la jornada se cuantifican las perdidas evitadas en tres rubros, en
+pesos mexicanos:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcl}
+\toprule
+\textbf{Rubro} & \textbf{Parametro} & \textbf{Justificacion} \\
+\midrule
+Energia desperdiciada & \$3.50 / kWh    & Tarifa industrial promedio \\
+Tiempo improductivo   & \$42 / min      & Operador + maquina + cosecha no realizada \\
+Rendimiento perdido   & \$580 / zona    & Labor deficiente por sobrecarga no corregida \\
+\bottomrule
+\end{tabular}
+\caption{Modelo de costeo del reporte de jornada.}
+\end{table}
+
+El costo del tiempo no es solo el operador: incluye la \textbf{superficie que se
+deja de cosechar} mientras la maquina esta detenida. Cada paro por limitacion
+electrica se traduce en menos hectareas trabajadas.
+
+% ============================================================
+\section{Preguntas frecuentes y como defenderlas}
+
+\subsection*{P1. ¿Esto es IA de verdad o son reglas if/else?}
+\begin{defensa}
+Es Control Predictivo basado en Modelo (MPC), un metodo de control optimo usado
+en industria (refinerias, automocion, robotica). El sistema optimiza una funcion
+objetivo (maximizar profundidad util) sujeta a restricciones (limite de amperaje
+y de bateria) sobre un horizonte de prediccion. No es cosmetico: toma decisiones
+de actuacion autonomas en tiempo real. El planificador, ademas, resuelve un
+problema de optimizacion con restriccion energetica global.
+\end{defensa}
+
+\subsection*{P2. ¿Las predicciones usan datos de lotes anteriores / ML?}
+\begin{defensa}
+La prediccion en si es deterministica (modelo fisico + lookahead del mapa). Los
+\emph{datos de entrada} —el mapa de resistencia $k$— son los que provienen de
+pasadas previas, sensores en punto de trabajo y mapas de suelo del Operations
+Center. Es decir: los datos historicos alimentan el mapa; el control razona sobre
+ese mapa con fisica. Esto es mas robusto y defendible que una caja negra de ML,
+y no requiere dataset de entrenamiento para funcionar el dia uno.
+\end{defensa}
+
+\subsection*{P3. ¿Por que el consumo de bateria es tan alto / se agota rapido?}
+\begin{defensa}
+Hay un factor de demostracion ($\beta = 8$) que acelera el consumo para que sea
+visible en la demo. En una unidad real $\beta = 1$. Lo relevante no es el valor
+absoluto sino la diferencia relativa entre operar con y sin gestion: el sistema
+extiende la autonomia y permite completar lotes que de otro modo no se terminarian.
+\end{defensa}
+
+\subsection*{P4. ¿Que aporta la electrificacion que el PTO mecanico no puede?}
+\begin{defensa}
+El PTO entrega potencia mecanica bruta pero no control fino: una sola
+configuracion para toda la barra. La transmision electrica permite alimentar
+sensores, controladores y actuadores en el punto de trabajo, habilitando
+ajuste de profundidad por zona (y potencialmente por cuerpo), telemetria en vivo
+y la gestion de energia por prioridades. La precision de FieldSense solo es
+posible con energia electrica controlable.
+\end{defensa}
+
+\subsection*{P5. ¿Como garantizan que no haya paros lejos de la red?}
+\begin{defensa}
+Tres capas: (1) el planificador valida la viabilidad energetica \emph{antes} de
+arrancar; (2) el control predictivo evita picos que disparan consumo; (3) el
+sistema de prioridades mantiene vivos los subsistemas esenciales aunque la
+demanda suba. La continuidad operativa es el requisito de diseno, no un extra.
+\end{defensa}
+
+\subsection*{P6. ¿Es viable implementarlo en campo real? (escalabilidad)}
+\begin{defensa}
+El modelo es ligero (algebra lineal, sin inferencia pesada), corre en el
+controlador embebido del tractor. Se integra con la plataforma electrica de John
+Deere y el Operations Center para los mapas. El siguiente paso seria validar los
+coeficientes $k$ con datos de campo reales y calibrar por tipo de implemento.
+\end{defensa}
+
+\subsection*{P7. ¿Que pasa si el mapa de suelo esta equivocado o desactualizado?}
+\begin{defensa}
+Por eso existe la salvaguarda reactiva: si la realidad excede la prediccion, el
+lazo de seguridad recorta igual y respeta el limite de amperaje. El sistema es
+robusto a mapas imperfectos: el mapa optimiza, pero la seguridad no depende de el.
+Ademas, cada pasada actualiza el mapa (se retroalimenta).
+\end{defensa}
+
+\subsection*{P8. ¿Como se eligio el horizonte de prediccion $L = 4$?}
+\begin{defensa}
+Es un compromiso: suficiente anticipacion para que el ajuste gradual de 2 cm/paso
+llegue a tiempo al objetivo, sin sobre-reaccionar a terreno lejano que podria
+cambiar. Es un parametro calibrable segun velocidad y dinamica del actuador real.
+\end{defensa}
+
+\subsection*{P9. ¿Por que un operador confiaria en que el sistema baje la profundidad solo?}
+\begin{defensa}
+No es totalmente autonomo por diseno: ante un evento relevante, el sistema avisa
+y da al operador la decision (aceptar el pre-ajuste o tomar control manual), con
+un temporizador que actua si no hay respuesta. Respeta la expectativa del operador
+de un sistema simple y confiable, manteniendolo en el lazo de decision.
+\end{defensa}
+
+\subsection*{P10. ¿Cual es el retorno de inversion?}
+\begin{defensa}
+El reporte de jornada lo cuantifica en pesos: energia ahorrada, tiempo
+productivo conservado (mas hectareas) y rendimiento protegido. El argumento de
+venta para John Deere no es un tractor, es una plataforma que los fabricantes de
+implementos adoptan con reglas claras de energia: ecosistema.
+\end{defensa}
+
+% ============================================================
+\section{Parametros de referencia del prototipo}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lc}
+\toprule
+\textbf{Parametro} & \textbf{Valor por defecto} \\
+\midrule
+Ancho de trabajo $a$            & 1.5 m \\
+Numero de cuerpos $n$           & 4 \\
+Profundidad recomendada $d_{rec}$ & 24 cm \\
+Velocidad $v$                   & 8 km/h \\
+Voltaje del bus $V$             & 700 V \\
+Eficiencia $\eta$               & 0.85 \\
+Amperaje maximo $I_{max}$       & 100 A \\
+Potencia del bus $P_{bus}$      & 78 kW \\
+Bateria de jornada              & 50 kWh \\
+Horizonte de prediccion $L$     & 4 celdas \\
+Paso de ajuste                  & 2 cm \\
+Piso de profundidad             & 10 cm \\
+\bottomrule
+\end{tabular}
+\caption{Valores por defecto usados en el prototipo (configurables).}
+\end{table}
+
+\vfill
+\begin{center}
+\textit{FieldSense --- Convierte energia electrica en decisiones agronomicas,
+sin sacrificar continuidad operativa.}
+\end{center}
+
+\end{document}
