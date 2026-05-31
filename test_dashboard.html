@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Test Dashboard - Diagnóstico</title>
+    <style>
+        body {
+            font-family: 'Courier New', monospace;
+            background: #1a1a1a;
+            color: #00ff00;
+            padding: 20px;
+            margin: 0;
+        }
+        .container {
+            max-width: 800px;
+            margin: 0 auto;
+            background: #000;
+            padding: 20px;
+            border: 2px solid #00ff00;
+            border-radius: 8px;
+        }
+        h1 {
+            color: #ffde00;
+            text-align: center;
+            margin-bottom: 30px;
+        }
+        .status {
+            padding: 15px;
+            margin: 10px 0;
+            border-left: 4px solid #00ff00;
+            background: #0a0a0a;
+        }
+        .error {
+            border-left-color: #ff0000;
+            color: #ff6b6b;
+        }
+        .warning {
+            border-left-color: #ffde00;
+            color: #ffde00;
+        }
+        .success {
+            border-left-color: #00ff00;
+            color: #00ff00;
+        }
+        .data-box {
+            background: #0a0a0a;
+            padding: 15px;
+            margin: 10px 0;
+            border: 1px solid #333;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        .label {
+            color: #888;
+            font-size: 12px;
+            text-transform: uppercase;
+            margin-bottom: 5px;
+        }
+        .value {
+            font-size: 24px;
+            font-weight: bold;
+            margin: 5px 0;
+        }
+        .value.good {
+            color: #00ff00;
+        }
+        .value.bad {
+            color: #ff0000;
+        }
+        button {
+            background: #367c2b;
+            color: white;
+            border: none;
+            padding: 12px 24px;
+            font-size: 16px;
+            font-weight: bold;
+            cursor: pointer;
+            border-radius: 4px;
+            margin: 10px 5px;
+            font-family: 'Courier New', monospace;
+        }
+        button:hover {
+            background: #2b6322;
+        }
+        button:active {
+            transform: scale(0.98);
+        }
+        pre {
+            background: #0a0a0a;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 12px;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin: 20px 0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🔍 DIAGNÓSTICO DEL DASHBOARD</h1>
+        
+        <div class="status" id="connection-status">
+            <div class="label">Estado de Conexión</div>
+            <div class="value">Verificando...</div>
+        </div>
+
+        <div style="text-align: center; margin: 20px 0;">
+            <button onclick="checkData()">🔄 Verificar Datos</button>
+            <button onclick="startMonitoring()">👁️ Monitorear en Tiempo Real</button>
+            <button onclick="stopMonitoring()">⏹️ Detener Monitor</button>
+        </div>
+
+        <div class="grid" id="data-grid">
+            <!-- Se llenará dinámicamente -->
+        </div>
+
+        <div class="data-box">
+            <div class="label">Datos Completos (JSON)</div>
+            <pre id="json-output">Esperando datos...</pre>
+        </div>
+
+        <div class="data-box">
+            <div class="label">Log de Actualizaciones</div>
+            <pre id="log-output">Listo para monitorear...</pre>
+        </div>
+    </div>
+
+    <script>
+        let monitorInterval = null;
+        let updateCount = 0;
+        const logs = [];
+
+        function addLog(message) {
+            const timestamp = new Date().toLocaleTimeString();
+            logs.unshift(`[${timestamp}] ${message}`);
+            if (logs.length > 10) logs.pop();
+            document.getElementById('log-output').textContent = logs.join('\n');
+        }
+
+        function checkData() {
+            addLog('🔍 Verificando datos en localStorage...');
+            
+            const rawData = localStorage.getItem('tractor_telemetry');
+            
+            if (!rawData) {
+                document.getElementById('connection-status').className = 'status error';
+                document.getElementById('connection-status').innerHTML = `
+                    <div class="label">Estado de Conexión</div>
+                    <div class="value">❌ NO HAY DATOS</div>
+                    <div style="font-size: 12px; margin-top: 10px;">
+                        El simulador no ha enviado datos aún.<br>
+                        1. Ve a <a href="/simulador" style="color: #ffde00;">/simulador</a><br>
+                        2. Activa "Usar Backend"<br>
+                        3. Inicia la simulación
+                    </div>
+                `;
+                addLog('❌ No se encontraron datos en localStorage');
+                return;
+            }
+
+            try {
+                const data = JSON.parse(rawData);
+                addLog('✅ Datos encontrados y parseados correctamente');
+                
+                // Verificar campos críticos
+                const velocidad = data.velocidad;
+                const rpm = data.rpm;
+                const profundidad = data.profundidad?.actual;
+                const amperaje = data.amperaje?.actual;
+
+                // Determinar estado
+                let allGood = true;
+                let issues = [];
+
+                if (velocidad === undefined || velocidad === 0) {
+                    allGood = false;
+                    issues.push('Velocidad es 0 o undefined');
+                }
+
+                if (rpm === undefined || rpm === 0) {
+                    allGood = false;
+                    issues.push('RPM es 0 o undefined');
+                }
+
+                if (profundidad === undefined) {
+                    allGood = false;
+                    issues.push('Profundidad es undefined');
+                }
+
+                if (amperaje === undefined || amperaje < 10) {
+                    allGood = false;
+                    issues.push(`Amperaje muy bajo: ${amperaje}A (debería ser >40A)`);
+                }
+
+                // Actualizar estado de conexión
+                if (allGood) {
+                    document.getElementById('connection-status').className = 'status success';
+                    document.getElementById('connection-status').innerHTML = `
+                        <div class="label">Estado de Conexión</div>
+                        <div class="value">✅ DATOS CORRECTOS</div>
+                        <div style="font-size: 12px; margin-top: 10px;">
+                            El backend está enviando datos válidos.
+                        </div>
+                    `;
+                    addLog('✅ Todos los campos están correctos');
+                } else {
+                    document.getElementById('connection-status').className = 'status warning';
+                    document.getElementById('connection-status').innerHTML = `
+                        <div class="label">Estado de Conexión</div>
+                        <div class="value">⚠️ DATOS INCOMPLETOS</div>
+                        <div style="font-size: 12px; margin-top: 10px;">
+                            Problemas detectados:<br>
+                            ${issues.map(i => `• ${i}`).join('<br>')}
+                            <br><br>
+                            <strong>Solución: Reinicia el backend</strong><br>
+                            cd backend && run.bat
+                        </div>
+                    `;
+                    addLog(`⚠️ Problemas: ${issues.join(', ')}`);
+                }
+
+                // Mostrar datos en grid
+                const grid = document.getElementById('data-grid');
+                grid.innerHTML = `
+                    <div class="data-box">
+                        <div class="label">Velocidad</div>
+                        <div class="value ${velocidad > 0 ? 'good' : 'bad'}">
+                            ${velocidad !== undefined ? velocidad.toFixed(2) : 'N/A'} km/h
+                        </div>
+                    </div>
+                    <div class="data-box">
+                        <div class="label">RPM</div>
+                        <div class="value ${rpm > 0 ? 'good' : 'bad'}">
+                            ${rpm !== undefined ? rpm : 'N/A'}
+                        </div>
+                    </div>
+                    <div class="data-box">
+                        <div class="label">Profundidad</div>
+                        <div class="value ${profundidad !== undefined ? 'good' : 'bad'}">
+                            ${profundidad !== undefined ? profundidad.toFixed(2) : 'N/A'} cm
+                        </div>
+                    </div>
+                    <div class="data-box">
+                        <div class="label">Amperaje</div>
+                        <div class="value ${amperaje > 10 ? 'good' : 'bad'}">
+                            ${amperaje !== undefined ? amperaje.toFixed(2) : 'N/A'} A
+                        </div>
+                    </div>
+                `;
+
+                // Mostrar JSON completo
+                document.getElementById('json-output').textContent = JSON.stringify(data, null, 2);
+
+            } catch (e) {
+                document.getElementById('connection-status').className = 'status error';
+                document.getElementById('connection-status').innerHTML = `
+                    <div class="label">Estado de Conexión</div>
+                    <div class="value">❌ ERROR DE PARSEO</div>
+                    <div style="font-size: 12px; margin-top: 10px;">
+                        ${e.message}
+                    </div>
+                `;
+                addLog(`❌ Error al parsear JSON: ${e.message}`);
+            }
+        }
+
+        function startMonitoring() {
+            if (monitorInterval) {
+                addLog('⚠️ El monitor ya está activo');
+                return;
+            }
+
+            addLog('👁️ Iniciando monitoreo en tiempo real...');
+            updateCount = 0;
+
+            // Verificar inmediatamente
+            checkData();
+
+            // Verificar cada segundo
+            monitorInterval = setInterval(() => {
+                updateCount++;
+                checkData();
+                addLog(`🔄 Actualización #${updateCount}`);
+            }, 1000);
+        }
+
+        function stopMonitoring() {
+            if (monitorInterval) {
+                clearInterval(monitorInterval);
+                monitorInterval = null;
+                addLog('⏹️ Monitor detenido');
+            } else {
+                addLog('⚠️ El monitor no estaba activo');
+            }
+        }
+
+        // Verificar automáticamente al cargar
+        window.addEventListener('load', () => {
+            addLog('🚀 Página cargada, verificando datos...');
+            checkData();
+        });
+
+        // Escuchar cambios en localStorage
+        window.addEventListener('storage', (e) => {
+            if (e.key === 'tractor_telemetry') {
+                addLog('📡 Datos actualizados desde el simulador');
+                if (monitorInterval) {
+                    checkData();
+                }
+            }
+        });
+    </script>
+</body>
+</html>

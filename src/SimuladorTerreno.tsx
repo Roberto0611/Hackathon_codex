@@ -25,7 +25,9 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
     kwhAcumulados: 0,
     amperajeActual: 0,
     profundidadActual: 20,
-    recomendada: 20
+    recomendada: 20,
+    kwhAhorrados: 0,
+    bateria: 50 // Reducido de 150 a 50 kWh para consumo más visible
   });
 
   // Parámetros de simulación
@@ -33,9 +35,9 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
   const [paramN, setParamN] = useState(4);
   const [paramD, setParamD] = useState(20);
   const [paramV, setParamV] = useState(8);
-  const [paramVolt, setParamVolt] = useState(400);
+  const [paramVolt, setParamVolt] = useState(700);
   const [paramEff, setParamEff] = useState(0.85);
-  const [paramMaxI, setParamMaxI] = useState(120);
+  const [paramMaxI, setParamMaxI] = useState(100);
   const [animSpeed, setAnimSpeed] = useState(3000); // 2000 lento, 1000 normal, 500 rapido
 
   const historyAmpArr = useRef<number[]>([]);
@@ -52,7 +54,9 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
         kwhAcumulados: 0,
         amperajeActual: 0,
         profundidadActual: paramD,
-        recomendada: paramD
+        recomendada: paramD,
+        kwhAhorrados: 0,
+        bateria: 50 // Reducido de 150 a 50 kWh para consumo más visible
       });
       historyAmpArr.current = [];
     }
@@ -106,9 +110,9 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
 
       if (y >= mapSize) {
         // Parcela completada - calcular estadísticas
-        const amperajes = Object.values(history).map(h => h.amperaje);
-        const amperajeTotal = amperajes.reduce((sum, amp) => sum + amp, 0);
-        const amperajePromedio = amperajeTotal / amperajes.length;
+        const histAmperajes = Object.values(history).map(h => h.amperaje);
+        const amperajeTotal = histAmperajes.reduce((sum, amp) => sum + amp, 0);
+        const amperajePromedio = amperajeTotal / histAmperajes.length;
         
         // Calcular kWh total acumulado
         let kwhTotal = 0;
@@ -125,6 +129,12 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
           kwhTotal
         };
         
+        // Calcular consumo promedio para horas restantes finales
+        const finalAmperajes = Object.values(history).map(h => h.amperaje);
+        const finalAmperajePromedio = finalAmperajes.reduce((sum, amp) => sum + amp, 0) / finalAmperajes.length;
+        const consumoPromedioKw = (finalAmperajePromedio * paramVolt) / 1000;
+        const horasRestantesFinales = stats.bateria > 0 ? stats.bateria / Math.max(0.1, consumoPromedioKw) : 0;
+        
         const finalState = {
           parcelaCompletada: true,
           estadisticasParcela,
@@ -133,7 +143,11 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
           profundidad: { actual: stats.profundidadActual, recomendada: paramD },
           velocidad: paramV,
           ajustes_automaticos: stats.ajustes,
-          kwh_ahorrados: stats.ajustes * 0.15,
+          kwh_ahorrados: parseFloat(stats.kwhAhorrados.toFixed(2)),
+          bateria: { 
+            porcentaje: parseFloat(((stats.bateria/50)*100).toFixed(1)), // Cambiar de 150 a 50 kWh
+            horas_restantes: parseFloat(horasRestantesFinales.toFixed(2))
+          },
           historial_amperaje: [...historyAmpArr.current],
           mapa_terreno: grid,
           tractor_pos: prev,
@@ -153,25 +167,27 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
       const cellType = grid[y][x];
       const k = CELL_TYPES[cellType as keyof typeof CELL_TYPES].k;
       
-      let d_current = paramD;
+      let d_current = stats.profundidadActual;
       let amperaje = 0;
       let requiredAdjustments = 0;
 
       // Cálculo de fórmulas y peak shaving
       let iterSafety = 10;
-      while (iterSafety > 0) {
-        const R = k * paramA * d_current * paramN;
-        const P = (R * paramV) / paramEff; // Watt
-        amperaje = P / paramVolt;
-        
-        if (amperaje > paramMaxI && d_current > 10) {
-          d_current -= 2;
-          requiredAdjustments++;
-        } else {
-          break;
+        while (iterSafety > 0) {
+          const R_kN = k * paramA * (d_current / 100) * paramN;
+          const R_N = R_kN * 1000;
+          const v_ms = paramV / 3.6;
+          const P_watts = (R_N * v_ms) / paramEff;
+          amperaje = P_watts / paramVolt;
+
+          if (amperaje > paramMaxI && d_current > 10) {
+            d_current -= 2;
+            requiredAdjustments++;
+          } else {
+            break;
+          }
+          iterSafety--;
         }
-        iterSafety--;
-      }
 
       const cellKey = `${x},${y}`;
       setHistory(prevHist => ({
@@ -179,11 +195,12 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
         [cellKey]: { amperaje, profundidad_usada: d_current }
       }));
 
-      // KWH = Power (kW) * Time (hours). 1 celda asume 1 metro?
-      // time (h) = distance (1m = 0.001km) / speed (km/h) 
+      // KWH = Power (kW) * Time (hours). 1 celda asume 1 metro
+      // time (h) = distance (1m = 0.001km) / speed (km/h)
+      // Multiplicador de 8x para hacer el consumo más visible en la demo
       const timeInHours = 0.001 / paramV;
       const kW = (amperaje * paramVolt) / 1000;
-      const kWhThisCell = kW * timeInHours;
+      const kWhThisCell = kW * timeInHours * 8; // Factor 8x para consumo más rápido y visible
 
       historyAmpArr.current.push(amperaje);
       if (historyAmpArr.current.length > 20) {
@@ -195,17 +212,32 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
         kwhAcumulados: prevStats.kwhAcumulados + kWhThisCell,
         amperajeActual: amperaje,
         profundidadActual: d_current,
-        recomendada: paramD
+        recomendada: paramD,
+        kwhAhorrados: prevStats.kwhAhorrados + (requiredAdjustments * 0.15),
+        bateria: Math.max(0, prevStats.bateria - kWhThisCell) // Usar kWhThisCell que ya incluye el factor 8x
       }));
 
+      const newAj = stats.ajustes + requiredAdjustments;
+      const newAhorros = stats.kwhAhorrados + (requiredAdjustments * 0.15);
+      const newBat = Math.max(0, stats.bateria - kWhThisCell);
+      
+      // Calcular horas restantes de forma más realista
+      // Horas = Batería restante (kWh) / Consumo promedio (kW)
+      const consumoPromedioKw = kW; // Consumo actual en kW
+      const horasRestantes = newBat > 0 ? newBat / Math.max(0.1, consumoPromedioKw) : 0;
+      
       const newState = {
         parcelaCompletada: false,
         posicion: { x, y },
         amperaje: { actual: amperaje, optimo: 75, maximo: paramMaxI },
         profundidad: { actual: d_current, recomendada: paramD },
         velocidad: paramV,
-        ajustes_automaticos: requiredAdjustments,
-        kwh_ahorrados: requiredAdjustments * 0.15, // Mock value
+        ajustes_automaticos: newAj,
+        kwh_ahorrados: parseFloat(newAhorros.toFixed(2)),
+        bateria: { 
+          porcentaje: parseFloat(((newBat/50)*100).toFixed(1)), // Cambiar de 150 a 50 kWh
+          horas_restantes: parseFloat(horasRestantes.toFixed(2))
+        },
         historial_amperaje: [...historyAmpArr.current],
         mapa_terreno: grid,
         tractor_pos: { x, y },
@@ -461,6 +493,18 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
           <div className="w-1/3 min-w-[120px]">
             <span className="text-gray-500 block mb-1">ENERGÍA (ESTIMADA)</span>
             <span className="text-xl font-bold text-[#7db356]">{stats.kwhAcumulados.toFixed(2)} kWh</span>
+          </div>
+          <div className="w-1/3 min-w-[120px]">
+            <span className="text-gray-500 block mb-1">BATERÍA RESTANTE</span>
+            <span className={`text-xl font-bold ${stats.bateria < 10 ? 'text-red-500 animate-pulse' : stats.bateria < 20 ? 'text-yellow-400' : 'text-[#367C2B]'}`}>
+              {stats.bateria.toFixed(2)} kWh
+            </span>
+            <div className="w-full h-2 bg-gray-700 rounded-full overflow-hidden mt-1">
+              <div 
+                className={`h-full transition-all duration-300 ${stats.bateria < 10 ? 'bg-red-500' : stats.bateria < 20 ? 'bg-yellow-400' : 'bg-[#367C2B]'}`}
+                style={{ width: `${(stats.bateria / 50) * 100}%` }}
+              ></div>
+            </div>
           </div>
         </div>
       </div>

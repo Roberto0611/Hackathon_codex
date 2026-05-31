@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   LineChart,
   Line,
@@ -7,10 +7,7 @@ import {
   CartesianGrid,
   Tooltip,
   ResponsiveContainer,
-  ReferenceArea,
-  PieChart,
-  Pie,
-  Cell
+  ReferenceArea
 } from 'recharts';
 
 // --- Constantes de Diseño (Identidad John Deere) ---
@@ -25,30 +22,109 @@ const COLORS = {
   mapHigh: '#EF9A9A' // Rojo suave
 };
 
-const PIE_COLORS = [COLORS.green, COLORS.yellow, '#4A4A4A', '#9E9E9E'];
+// --- Núcleo IA: Sistema de prioridades de energía ---
+// Potencia que el bus/batería puede entregar de forma sostenida (kW).
+const POTENCIA_BUS = 78;
 
-// --- Estado Inicial Mock ---
+// Jerarquía de subsistemas. La IA nunca reduce prioridad 1.
+// base: demanda nominal (kW) en condiciones normales.
+// sensibilidadCarga: cuánto crece su demanda cuando el terreno exige más (0 = constante).
+// minRatio: piso mínimo respecto a su nominal antes de comprometer la operación.
+const SUBSISTEMAS = [
+  { id: 'sensores',   nombre: 'Sensores y Control', prioridad: 1, base: 6,  sensibilidadCarga: 0,   minRatio: 1.0 },
+  { id: 'traccion',   nombre: 'Tracción',           prioridad: 2, base: 22, sensibilidadCarga: 0.9, minRatio: 0.85 },
+  { id: 'elevador',   nombre: 'Motor Elevador',     prioridad: 2, base: 26, sensibilidadCarga: 1.0, minRatio: 0.6 },
+  { id: 'hidraulica', nombre: 'Hidráulica Auxiliar', prioridad: 3, base: 12, sensibilidadCarga: 0,   minRatio: 0.3 },
+  { id: 'cabina',     nombre: 'Confort de Cabina',  prioridad: 3, base: 8,  sensibilidadCarga: 0,   minRatio: 0.15 }
+];
+
+// Reasigna los kW disponibles respetando la jerarquía de prioridades.
+// Recorta primero los auxiliares (P3) y solo en caso extremo toca P2. Nunca P1.
+// loadFactor <= 0 representa tractor inactivo: sin demanda.
+function redistribuirEnergia(loadFactor: number, disponible: number) {
+  // Tractor inactivo: ningún subsistema consume.
+  if (loadFactor <= 0) {
+    const items = SUBSISTEMAS.map(s => ({
+      id: s.id,
+      nombre: s.nombre,
+      prioridad: s.prioridad,
+      demandado: 0,
+      asignado: 0,
+      piso: 0
+    }));
+    return { items, totalDemandado: 0, totalAsignado: 0, disponible, reducciones: [] as { id: string; nombre: string; pct: number }[] };
+  }
+
+  const lf = Math.max(1, loadFactor);
+
+  const items = SUBSISTEMAS.map(s => {
+    const demandado = s.base * (1 + s.sensibilidadCarga * (lf - 1));
+    return {
+      id: s.id,
+      nombre: s.nombre,
+      prioridad: s.prioridad,
+      demandado,
+      asignado: demandado,
+      piso: s.base * s.minRatio
+    };
+  });
+
+  const totalDemandado = items.reduce((acc, it) => acc + it.demandado, 0);
+  let deficit = totalDemandado - disponible;
+
+  if (deficit > 0.01) {
+    // Recortar por nivel: primero auxiliares (3), luego esenciales secundarios (2).
+    for (const nivel of [3, 2]) {
+      if (deficit <= 0.01) break;
+      const grupo = items.filter(it => it.prioridad === nivel);
+      const margenGrupo = grupo.reduce((acc, it) => acc + (it.asignado - it.piso), 0);
+      if (margenGrupo <= 0) continue;
+
+      const recorteGrupo = Math.min(deficit, margenGrupo);
+      for (const it of grupo) {
+        const margenItem = it.asignado - it.piso;
+        if (margenItem <= 0) continue;
+        it.asignado -= recorteGrupo * (margenItem / margenGrupo);
+      }
+      deficit -= recorteGrupo;
+    }
+  }
+
+  const reducciones = items
+    .map(it => ({
+      id: it.id,
+      nombre: it.nombre,
+      pct: it.demandado > 0 ? Math.round((1 - it.asignado / it.demandado) * 100) : 0
+    }))
+    .filter(r => r.pct >= 1);
+
+  const totalAsignado = items.reduce((acc, it) => acc + it.asignado, 0);
+
+  return { items, totalDemandado, totalAsignado, disponible, reducciones };
+}
+
+// --- Estado Inicial (sin datos hasta iniciar simulación) ---
 const INITIAL_STATE = {
-  posicion: { x: 4, y: 7 },
-  amperaje: { actual: 87, optimo: 75, maximo: 120 },
-  profundidad: { actual: 28, recomendada: 24 },
-  velocidad: 6.2,
-  rpm: 1800,
-  bateria: { porcentaje: 72, horas_restantes: 8.4 },
+  posicion: { x: 0, y: 0 },
+  amperaje: { actual: 0, optimo: 75, maximo: 120 },
+  profundidad: { actual: 0, recomendada: 0 },
+  velocidad: 0,
+  rpm: 0,
+  bateria: { porcentaje: 0, horas_restantes: 0 },
   kw_subsistemas: {
-    implemento: 32,
-    traccion: 28,
-    hidraulica: 12,
-    cabina: 8
+    implemento: 0,
+    traccion: 0,
+    hidraulica: 0,
+    cabina: 0
   },
-  estado: "ajustando",
-  ajustes_automaticos: 15,
-  kwh_ahorrados: 4.2,
-  historial_amperaje: [72, 75, 80, 87, 91, 88, 85, 83, 87],
+  estado: "inactivo",
+  ajustes_automaticos: 0,
+  kwh_ahorrados: 0,
+  historial_amperaje: [] as number[],
   alerta: {
-    activa: true,
+    activa: false,
     tipo: "peak_shaving",
-    mensaje: "El sistema quiere bajar la profundidad de 28cm a 24cm",
+    mensaje: "",
     countdown: 7,
     max_countdown: 7
   },
@@ -58,16 +134,22 @@ const INITIAL_STATE = {
     [2, 2, 3, 3, 2],
     [1, 1, 2, 2, 1]
   ],
-  tractor_pos: { x: 2, y: 3 }, // x=columna, y=fila (0-indexed)
-  logs_recientes: [
-    "10:42 Ajuste preventivo: V -0.5km/h",
-    "10:35 Peak alert: Profundidad -2cm",
-    "10:15 Inicio de sesión de calibración"
-  ]
+  tractor_pos: { x: -1, y: -1 }, // fuera del mapa hasta que arranque la simulación
+  logs_recientes: [] as string[]
+};
+
+// --- Perfil del operador reconocido al encender el tractor ---
+const PERFIL_OPERADOR = {
+  nombre: "Juan",
+  lote: "Lote 4",
+  cultivo: "Trigo",
+  profundidadRecomendada: 24, // cm
+  unidad: "EV-7820"
 };
 
 export default function App() {
   const [data, setData] = useState(INITIAL_STATE);
+  const [sesionIniciada, setSesionIniciada] = useState(false);
   const [historial, setHistorial] = useState<Record<string, number>>({});
   const [parcelasCompletadas, setParcelasCompletadas] = useState<Array<{
     fecha: string;
@@ -76,10 +158,12 @@ export default function App() {
     celdasRecorridas: number;
     kwhTotal: number;
   }>>([]);
+  const [mostrarReporte, setMostrarReporte] = useState(false);
+  const [reporteActual, setReporteActual] = useState<any>(null);
   
   // --- Simulación de WebSocket (Tiempo Real) ---
   useEffect(() => { 
-    const h=(e)=>{
+    const h=(e: StorageEvent)=>{
       if(e.key==='tractor_telemetry'&&e.newValue){
         try{
           const t=JSON.parse(e.newValue);
@@ -100,6 +184,9 @@ export default function App() {
               kwhTotal: parseFloat(t.estadisticasParcela.kwhTotal.toFixed(2))
             };
             setParcelasCompletadas(prev => [nuevaParcela, ...prev]);
+            
+            // Generar reporte de eficiencia
+            generarReporteEficiencia(t, nuevaParcela);
           }
           
           setData(p=>{
@@ -123,9 +210,9 @@ export default function App() {
           });
           
           if(t.historial_mapa){
-            const ch={};
+            const ch: Record<string, number> = {};
             for(const[k,v] of Object.entries(t.historial_mapa)){
-              ch[k]=v.amperaje;
+              ch[k]=(v as any).amperaje;
             }
             setHistorial(ch);
           }
@@ -135,6 +222,73 @@ export default function App() {
     window.addEventListener('storage',h);
     return()=>window.removeEventListener('storage',h); 
   }, []);
+
+  // Función para generar reporte de eficiencia
+  const generarReporteEficiencia = (telemetria: any, parcela: any) => {
+    // --- Parámetros económicos (contexto agrícola, MXN) ---
+    const COSTO_ENERGIA_KWH = 3.5;        // Tarifa industrial promedio MXN/kWh
+    const COSTO_TIEMPO_MINUTO = 42;       // Costo de operación detenida: operador + máquina + cosecha no realizada (MXN/min)
+    const COSTO_ZONA_DEFICIENTE = 580;    // Pérdida de rendimiento por zona mal trabajada (MXN/zona)
+
+    const ajustesRealizados = telemetria.ajustes_automaticos || 0;
+    const kwhAhorrados = telemetria.kwh_ahorrados || 0;
+
+    // Escenario SIN sistema: las sobrecargas obligan a detener y reajustar manualmente
+    const minutosParados = ajustesRealizados * 3;             // ~3 min de paro por sobrecarga
+    const zonasDeficientes = Math.floor(ajustesRealizados / 2); // Trabajo deficiente sin corrección a tiempo
+
+    // --- Desglose de costos evitados ---
+    const costoEnergia = kwhAhorrados * COSTO_ENERGIA_KWH;        // Energía desperdiciada
+    const costoTiempo = minutosParados * COSTO_TIEMPO_MINUTO;     // Tiempo improductivo = menos cosecha
+    const costoZonas = zonasDeficientes * COSTO_ZONA_DEFICIENTE;  // Rendimiento perdido
+    const costoTotalEvitado = costoEnergia + costoTiempo + costoZonas;
+
+    // Tiempo total de la jornada (estimado por celdas recorridas)
+    const tiempoJornadaMinutos = parcela.celdasRecorridas * 0.5;
+
+    // Eficiencia de batería
+    const bateriaRestantePorcentaje = telemetria.bateria?.porcentaje || 0;
+    const horasRestantes = telemetria.bateria?.horas_restantes || 0;
+
+    const reporte = {
+      fecha: parcela.fecha,
+      conSistema: {
+        minutosParados: 0,
+        zonasDeficientes: 0,
+        ajustesAutomaticos: ajustesRealizados,
+        kwhConsumidos: parcela.kwhTotal,
+        costoEnergia: parcela.kwhTotal * COSTO_ENERGIA_KWH,
+        bateriaRestante: bateriaRestantePorcentaje,
+        horasRestantes: horasRestantes
+      },
+      sinSistema: {
+        minutosParados: minutosParados,
+        zonasDeficientes: zonasDeficientes,
+        kwhConsumidos: parcela.kwhTotal + kwhAhorrados,
+        bateriaRestante: Math.max(0, bateriaRestantePorcentaje - 15)
+      },
+      // Costos evitados gracias al sistema (desglosados)
+      costos: {
+        energia: costoEnergia,
+        tiempo: costoTiempo,
+        zonas: costoZonas,
+        total: costoTotalEvitado
+      },
+      impacto: {
+        minutos: minutosParados,
+        zonas: zonasDeficientes,
+        kwh: kwhAhorrados
+      },
+      parcela: {
+        celdasRecorridas: parcela.celdasRecorridas,
+        tiempoTotal: tiempoJornadaMinutos,
+        amperajePromedio: parcela.amperajePromedio
+      }
+    };
+
+    setReporteActual(reporte);
+    setMostrarReporte(true);
+  };
 
   const handleAceptarAjuste = () => {
     setData(prev => ({
@@ -171,7 +325,111 @@ export default function App() {
 
   // Preparar datos para las gráficas
   const chartData = data.historial_amperaje.map((val, idx) => ({ time: idx, Amp: val }));
-  const pieData = Object.entries(data.kw_subsistemas).map(([key, value]) => ({ name: key.toUpperCase(), value }));
+
+  // --- Núcleo IA: redistribución de energía en tiempo real ---
+  // El factor de carga se deriva de qué tan por encima del óptimo está el amperaje.
+  const loadFactor = data.amperaje.optimo > 0 ? data.amperaje.actual / data.amperaje.optimo : 1;
+  const energia = redistribuirEnergia(loadFactor, POTENCIA_BUS);
+  const redistribucionActiva = energia.reducciones.length > 0;
+  const operacionInactiva = energia.totalDemandado <= 0;
+
+  // Registrar en el log cuando la IA entra o sale de redistribución
+  const prevRedistRef = useRef(false);
+  useEffect(() => {
+    if (redistribucionActiva === prevRedistRef.current) return;
+    prevRedistRef.current = redistribucionActiva;
+
+    // No registrar nada mientras el tractor está inactivo
+    if (operacionInactiva) return;
+
+    const mensaje = redistribucionActiva
+      ? `IA: Redistribución activa — ${energia.reducciones.map(r => `${r.nombre} -${r.pct}%`).join(', ')}`
+      : 'IA: Energía restablecida a plena potencia';
+
+    setData(prev => ({
+      ...prev,
+      logs_recientes: [mensaje, ...prev.logs_recientes.slice(0, 4)]
+    }));
+  }, [redistribucionActiva]);
+
+  // Confirmar set point recomendado y arrancar la jornada
+  const handleComenzarJornada = () => {
+    const hora = new Date().toLocaleTimeString('es-MX', { hour: '2-digit', minute: '2-digit' });
+    setData(prev => ({
+      ...prev,
+      profundidad: { ...prev.profundidad, actual: PERFIL_OPERADOR.profundidadRecomendada, recomendada: PERFIL_OPERADOR.profundidadRecomendada },
+      logs_recientes: [
+        `${hora} Sesión iniciada: ${PERFIL_OPERADOR.nombre} · ${PERFIL_OPERADOR.lote}`,
+        ...prev.logs_recientes.slice(0, 4)
+      ]
+    }));
+    setSesionIniciada(true);
+  };
+
+  // --- Pantalla de bienvenida / perfil del operador ---
+  if (!sesionIniciada) {
+    return (
+      <div className="min-h-screen bg-[#1A1A1A] text-white font-sans flex flex-col items-center justify-center p-6 relative overflow-hidden">
+        {/* Franja superior corporativa */}
+        <div className="absolute top-0 left-0 right-0 h-1.5 bg-[#FFDE00]"></div>
+
+        <div className="w-full max-w-lg">
+          {/* Marca */}
+          <div className="flex items-center gap-3 mb-10">
+            <img
+              src="logo.png"
+              alt="John Deere"
+              className="h-9 bg-white p-1 rounded-sm object-contain"
+              onError={(e) => { const t = e.target as HTMLImageElement; t.style.display = 'none'; if (t.nextSibling) (t.nextSibling as HTMLElement).style.display = 'block'; }}
+            />
+            <span style={{ display: 'none' }} className="font-bold text-xl tracking-widest text-[#FFDE00]">JOHN DEERE</span>
+            <div className="w-px h-6 bg-white/20"></div>
+            <span className="text-sm font-bold uppercase tracking-wider text-white/70">EV Peak Shaver</span>
+          </div>
+
+          {/* Estado del sistema */}
+          <div className="flex items-center gap-2 mb-4">
+            <span className="w-2 h-2 rounded-full bg-[#7db356] animate-pulse"></span>
+            <span className="text-xs uppercase tracking-wide text-white/50">Operador reconocido · Unidad {PERFIL_OPERADOR.unidad}</span>
+          </div>
+
+          {/* Bienvenida */}
+          <h1 className="text-5xl font-bold tracking-tight mb-2">
+            Hola, {PERFIL_OPERADOR.nombre}.
+          </h1>
+          <p className="text-white/60 text-lg mb-8">Tu jornada está lista para comenzar.</p>
+
+          {/* Ficha del día */}
+          <div className="bg-white/5 border border-white/10 rounded-lg divide-y divide-white/10 mb-8">
+            <div className="flex justify-between items-center px-5 py-4">
+              <span className="text-sm text-white/50 uppercase tracking-wide">Lote del día</span>
+              <span className="text-lg font-bold">{PERFIL_OPERADOR.lote}</span>
+            </div>
+            <div className="flex justify-between items-center px-5 py-4">
+              <span className="text-sm text-white/50 uppercase tracking-wide">Cultivo</span>
+              <span className="text-lg font-bold">{PERFIL_OPERADOR.cultivo}</span>
+            </div>
+            <div className="flex justify-between items-center px-5 py-4">
+              <span className="text-sm text-white/50 uppercase tracking-wide">Profundidad recomendada</span>
+              <span className="text-lg font-bold text-[#FFDE00]">{PERFIL_OPERADOR.profundidadRecomendada} cm</span>
+            </div>
+          </div>
+
+          {/* Acción única */}
+          <button
+            onClick={handleComenzarJornada}
+            className="w-full bg-[#367C2B] hover:bg-[#2b6322] text-white font-bold text-lg py-5 uppercase tracking-wider transition-colors flex items-center justify-center gap-3"
+          >
+            <svg xmlns="http://www.w3.org/2000/svg" width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><polygon points="6 3 20 12 6 21 6 3"/></svg>
+            Comenzar
+          </button>
+          <p className="text-center text-white/40 text-xs mt-4">
+            Set point recomendado por IA según operador, lote y cultivo. Podrás ajustarlo en cualquier momento.
+          </p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#F5F5F5] text-[#1A1A1A] font-sans relative overflow-hidden flex flex-col">
@@ -180,13 +438,17 @@ export default function App() {
       <header className="bg-[#367C2B] text-white px-6 py-4 flex justify-between items-center shadow-md z-10">
         <div className="flex items-center gap-4">
           {/* Logo simulado por IMG como requerido */}
-          <img src="logo.png" alt="John Deere Logo" className="h-8 bg-white p-1 rounded-sm object-contain" onError={(e) => { e.target.style.display='none'; e.target.nextSibling.style.display='block'; }} />
+          <img src="logo.png" alt="John Deere Logo" className="h-8 bg-white p-1 rounded-sm object-contain" onError={(e) => { const target = e.target as HTMLImageElement; target.style.display='none'; if(target.nextSibling) (target.nextSibling as HTMLElement).style.display='block'; }} />
           <div style={{display:'none'}} className="font-bold text-2xl tracking-widest text-[#FFDE00]">JOHN DEERE</div>
           <div className="w-px h-6 bg-white/30 mx-2"></div>
           <h1 className="text-xl font-bold uppercase tracking-wider">EV Peak Shaver</h1>
           <span className="ml-4 px-3 py-1 bg-white text-[#367C2B] rounded-full text-xs font-bold uppercase">Online</span>
         </div>
-        <div className="flex gap-6 text-sm font-bold">
+        <div className="flex gap-6 text-sm font-bold items-center">
+          <div className="flex flex-col items-end pr-2 border-r border-white/20">
+            <span className="text-white/60 uppercase text-[10px]">Operador</span>
+            <span className="text-sm leading-none">{PERFIL_OPERADOR.nombre} · {PERFIL_OPERADOR.lote}</span>
+          </div>
           <div className="flex flex-col items-center">
             <span className="text-white/80 uppercase text-[10px]">kWh Ahorrados</span>
             <span className="text-2xl text-[#FFDE00] leading-none">{data.kwh_ahorrados.toFixed(2)}</span>
@@ -362,37 +624,108 @@ export default function App() {
         {/* PANEL DERECHO: Energía y Log */}
         <section className="flex flex-col gap-4">
           
-          {/* Distribución de energía */}
-          <div className="bg-white p-4 shadow-sm">
-            <h2 className="text-sm font-bold uppercase text-gray-500 mb-2 tracking-wider">Demanda (kW)</h2>
-            <div className="h-40 w-full mb-2">
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={pieData}
-                    cx="50%"
-                    cy="50%"
-                    innerRadius={40}
-                    outerRadius={65}
-                    paddingAngle={2}
-                    dataKey="value"
-                    stroke="none"
-                  >
-                    {pieData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={PIE_COLORS[index % PIE_COLORS.length]} />
-                    ))}
-                  </Pie>
-                  <Tooltip formatter={(value) => [`${value} kW`, 'Consumo']} />
-                </PieChart>
-              </ResponsiveContainer>
+          {/* NÚCLEO IA: Gestión de Energía por Prioridades */}
+          <div className="bg-white p-4 shadow-sm border-t-4 border-[#1A1A1A]">
+            <div className="flex justify-between items-start mb-3">
+              <div>
+                <h2 className="text-sm font-bold uppercase text-gray-500 tracking-wider">Gestión de Energía</h2>
+                <p className="text-[10px] text-gray-400 font-bold uppercase tracking-wide">Núcleo IA · Prioridades</p>
+              </div>
+              <span className={`px-2 py-1 rounded-full text-[10px] font-bold uppercase tracking-wide ${operacionInactiva ? 'bg-gray-100 text-gray-400' : redistribucionActiva ? 'bg-[#FFDE00] text-[#1A1A1A]' : 'bg-green-100 text-[#367C2B]'}`}>
+                {operacionInactiva ? 'En espera' : redistribucionActiva ? 'Redistribuyendo' : 'Nominal'}
+              </span>
             </div>
-            <div className="flex flex-wrap gap-2 justify-center">
-              {pieData.map((entry, index) => (
-                <div key={entry.name} className="flex items-center text-[10px] font-bold text-gray-600">
-                  <span className="w-2 h-2 rounded-full mr-1" style={{backgroundColor: PIE_COLORS[index]}}></span>
-                  {entry.name}
-                </div>
-              ))}
+
+            {/* Balance del bus de potencia */}
+            <div className="bg-[#1A1A1A] text-white rounded-md p-3 mb-3">
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-[10px] uppercase tracking-wide text-white/60">Demanda / Disponible</span>
+                <span className="text-sm font-bold">
+                  <span className={energia.totalDemandado > energia.disponible ? 'text-[#FFDE00]' : 'text-[#7db356]'}>
+                    {energia.totalDemandado.toFixed(1)}
+                  </span>
+                  <span className="text-white/40"> / {energia.disponible.toFixed(0)} kW</span>
+                </span>
+              </div>
+              <div className="w-full h-2 bg-white/15 rounded-full overflow-hidden relative">
+                {/* Línea de capacidad disponible */}
+                <div
+                  className="h-full bg-[#367C2B]"
+                  style={{ width: `${energia.totalDemandado > 0 ? Math.min(100, (energia.totalAsignado / energia.totalDemandado) * 100) : 0}%` }}
+                ></div>
+              </div>
+              <div className="text-[10px] text-white/50 mt-1">
+                Asignado tras redistribución: <span className="text-white font-bold">{energia.totalAsignado.toFixed(1)} kW</span>
+              </div>
+            </div>
+
+            {/* Asignación por subsistema */}
+            <div className="space-y-2">
+              {energia.items.map(item => {
+                const pctAsignado = item.demandado > 0 ? (item.asignado / item.demandado) * 100 : 0;
+                const reducido = item.demandado > 0 && pctAsignado < 99;
+                const prioColor = item.prioridad === 1 ? '#367C2B' : item.prioridad === 2 ? '#1A1A1A' : '#9E9E9E';
+                return (
+                  <div key={item.id}>
+                    <div className="flex justify-between items-center mb-0.5">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[9px] font-bold text-white px-1.5 py-0.5 rounded" style={{ backgroundColor: prioColor }}>P{item.prioridad}</span>
+                        <span className="text-xs font-bold text-gray-700">{item.nombre}</span>
+                      </div>
+                      <span className={`text-xs font-bold ${reducido ? 'text-[#b58900]' : 'text-gray-700'}`}>
+                        {item.asignado.toFixed(1)} kW
+                      </span>
+                    </div>
+                    <div className="w-full h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                      <div
+                        className="h-full transition-all duration-500"
+                        style={{ width: `${pctAsignado}%`, backgroundColor: reducido ? '#FFDE00' : prioColor }}
+                      ></div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Aviso de la IA: qué redujo y por qué */}
+            {operacionInactiva ? (
+              <div className="mt-3 bg-gray-50 border-l-4 border-gray-300 p-3 rounded-r">
+                <p className="text-xs text-gray-500 leading-snug">
+                  Sin operación activa. Inicia la simulación para visualizar la gestión de energía en tiempo real.
+                </p>
+              </div>
+            ) : redistribucionActiva ? (
+              <div className="mt-3 bg-[#FFF9E6] border-l-4 border-[#FFDE00] p-3 rounded-r">
+                <p className="text-[10px] font-bold uppercase tracking-wide text-gray-600 mb-1">Acción de la IA</p>
+                <p className="text-xs text-gray-700 leading-snug">
+                  Pico de demanda detectado. Se redujo{' '}
+                  {energia.reducciones.map((r, i) => (
+                    <span key={r.id} className="font-bold text-[#1A1A1A]">
+                      {r.nombre} {r.pct}%{i < energia.reducciones.length - 1 ? ', ' : ''}
+                    </span>
+                  ))}
+                  {' '}para mantener sensores, control y tracción al 100%.
+                </p>
+              </div>
+            ) : (
+              <div className="mt-3 bg-gray-50 border-l-4 border-[#367C2B] p-3 rounded-r">
+                <p className="text-xs text-gray-600 leading-snug">
+                  Demanda dentro del límite del bus. Todos los subsistemas operan a plena potencia.
+                </p>
+              </div>
+            )}
+
+            {/* Leyenda de prioridades */}
+            <div className="flex flex-wrap gap-3 justify-center mt-3 pt-3 border-t border-gray-100">
+              <div className="flex items-center text-[10px] font-bold text-gray-500">
+                <span className="w-2 h-2 rounded-sm mr-1" style={{ backgroundColor: '#367C2B' }}></span>P1 · Esencial
+              </div>
+              <div className="flex items-center text-[10px] font-bold text-gray-500">
+                <span className="w-2 h-2 rounded-sm mr-1" style={{ backgroundColor: '#1A1A1A' }}></span>P2 · Operación
+              </div>
+              <div className="flex items-center text-[10px] font-bold text-gray-500">
+                <span className="w-2 h-2 rounded-sm mr-1" style={{ backgroundColor: '#9E9E9E' }}></span>P3 · Reducible
+              </div>
             </div>
           </div>
 
@@ -400,11 +733,15 @@ export default function App() {
           <div className="bg-white p-4 shadow-sm flex-1 flex flex-col">
             <h2 className="text-sm font-bold uppercase text-gray-500 mb-3 tracking-wider">Log de Ajustes</h2>
             <ul className="space-y-3 flex-1 overflow-auto">
-              {data.logs_recientes.map((log, index) => (
-                <li key={index} className="text-xs font-mono border-b border-gray-100 pb-2 text-gray-700">
-                  <span className="text-[#367C2B] mr-2">►</span>{log}
-                </li>
-              ))}
+              {data.logs_recientes.length === 0 ? (
+                <li className="text-xs font-mono text-gray-400 italic">Sin actividad. Inicia la simulación para registrar eventos.</li>
+              ) : (
+                data.logs_recientes.map((log, index) => (
+                  <li key={index} className="text-xs font-mono border-b border-gray-100 pb-2 text-gray-700">
+                    <span className="text-[#367C2B] mr-2">►</span>{log}
+                  </li>
+                ))
+              )}
             </ul>
           </div>
 
@@ -445,6 +782,17 @@ export default function App() {
 
         </section>
       </main>
+
+      {/* Botón para Ver Último Reporte */}
+      {parcelasCompletadas.length > 0 && reporteActual && (
+        <button
+          onClick={() => setMostrarReporte(true)}
+          className="fixed bottom-6 right-6 bg-[#367C2B] hover:bg-[#2b6322] text-white font-semibold px-5 py-3 rounded-md shadow-lg flex items-center gap-2 text-sm tracking-wide transition-colors z-40 border border-[#2b6322]"
+        >
+          <svg xmlns="http://www.w3.org/2000/svg" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 3v18h18"/><rect x="7" y="10" width="3" height="7"/><rect x="12" y="6" width="3" height="11"/><rect x="17" y="13" width="3" height="4"/></svg>
+          Reporte de Jornada
+        </button>
+      )}
 
       {/* MODAL DE SUBRUTINA PREVENTIVA (ALERTA) */}
       {data.alerta.activa && (
@@ -513,6 +861,164 @@ export default function App() {
             </div>
             <div className="p-3 bg-gray-100 text-center text-xs font-bold text-gray-500 uppercase tracking-widest">
               Si no respondes en {data.alerta.countdown}s, el sistema ajustará automáticamente.
+            </div>
+
+          </div>
+        </div>
+      )}
+
+      {/* MODAL DE REPORTE DE EFICIENCIA */}
+      {mostrarReporte && reporteActual && (
+        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white max-w-4xl w-full max-h-[92vh] overflow-y-auto shadow-2xl border-t-4 border-[#367C2B]">
+
+            {/* Encabezado */}
+            <div className="bg-[#1A1A1A] text-white px-6 py-5 flex justify-between items-center sticky top-0 z-10">
+              <div className="flex items-center gap-4">
+                <div className="w-px h-10 bg-[#FFDE00]"></div>
+                <div>
+                  <h2 className="text-xl font-bold uppercase tracking-wider">Reporte de Jornada</h2>
+                  <p className="text-white/60 text-xs mt-0.5 tracking-wide">FieldSense · Sistema Peak Shaving</p>
+                </div>
+              </div>
+              <div className="flex items-center gap-4">
+                <span className="text-white/60 text-xs font-medium hidden md:block">{reporteActual.fecha}</span>
+                <button
+                  onClick={() => setMostrarReporte(false)}
+                  className="text-white/60 hover:text-white text-xl leading-none transition-colors"
+                  aria-label="Cerrar"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            <div className="p-6 space-y-6">
+
+              {/* Resumen ejecutivo: beneficio neto */}
+              <div className="border border-gray-200">
+                <div className="bg-[#367C2B] text-white px-5 py-3">
+                  <h3 className="text-sm font-bold uppercase tracking-wider">Beneficio neto de la jornada</h3>
+                </div>
+                <div className="p-5 flex flex-col md:flex-row md:items-end md:justify-between gap-4">
+                  <div>
+                    <p className="text-sm text-gray-500 mb-1">Pérdidas evitadas por el sistema</p>
+                    <p className="text-4xl font-bold text-[#1A1A1A]">
+                      ${reporteActual.costos.total.toLocaleString('es-MX', { maximumFractionDigits: 0 })} <span className="text-lg font-semibold text-gray-500">MXN</span>
+                    </p>
+                  </div>
+                  <div className="text-sm text-gray-600 md:text-right">
+                    <p>{reporteActual.impacto.minutos} min de operación productiva conservados</p>
+                    <p>{reporteActual.conSistema.ajustesAutomaticos} ajustes automáticos aplicados</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* Desglose de costos evitados */}
+              <div className="border border-gray-200">
+                <div className="bg-gray-100 px-5 py-3 border-b border-gray-200">
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-gray-700">Desglose de pérdidas evitadas</h3>
+                </div>
+                <div className="divide-y divide-gray-100">
+                  <div className="flex justify-between items-center px-5 py-3">
+                    <div>
+                      <p className="text-sm font-semibold text-gray-800">Energía desperdiciada</p>
+                      <p className="text-xs text-gray-500">{reporteActual.impacto.kwh.toFixed(2)} kWh de sobreconsumo evitado</p>
+                    </div>
+                    <span className="text-lg font-bold text-[#1A1A1A]">${reporteActual.costos.energia.toLocaleString('es-MX', { maximumFractionDigits: 0 })}</span>
+                  </div>
+                  <div className="flex justify-between items-center px-5 py-3">
+                    <div>
+                      <p className="text-sm font-semibold text-gray-800">Tiempo improductivo</p>
+                      <p className="text-xs text-gray-500">{reporteActual.impacto.minutos} min de paro = menos superficie cosechada</p>
+                    </div>
+                    <span className="text-lg font-bold text-[#1A1A1A]">${reporteActual.costos.tiempo.toLocaleString('es-MX', { maximumFractionDigits: 0 })}</span>
+                  </div>
+                  <div className="flex justify-between items-center px-5 py-3">
+                    <div>
+                      <p className="text-sm font-semibold text-gray-800">Rendimiento perdido</p>
+                      <p className="text-xs text-gray-500">{reporteActual.impacto.zonas} zonas con labor deficiente evitadas</p>
+                    </div>
+                    <span className="text-lg font-bold text-[#1A1A1A]">${reporteActual.costos.zonas.toLocaleString('es-MX', { maximumFractionDigits: 0 })}</span>
+                  </div>
+                  <div className="flex justify-between items-center px-5 py-3 bg-gray-50">
+                    <p className="text-sm font-bold uppercase tracking-wide text-gray-700">Total</p>
+                    <span className="text-xl font-bold text-[#367C2B]">${reporteActual.costos.total.toLocaleString('es-MX', { maximumFractionDigits: 0 })} MXN</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Comparación con vs sin sistema */}
+              <div className="border border-gray-200">
+                <div className="bg-gray-100 px-5 py-3 border-b border-gray-200">
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-gray-700">Comparativa operativa</h3>
+                </div>
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="border-b border-gray-200 text-xs uppercase tracking-wide text-gray-500">
+                      <th className="text-left font-semibold px-5 py-3">Indicador</th>
+                      <th className="text-right font-semibold px-5 py-3 text-[#367C2B]">Con FieldSense</th>
+                      <th className="text-right font-semibold px-5 py-3 text-gray-500">Sin sistema</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-gray-100">
+                    <tr>
+                      <td className="px-5 py-3 text-gray-700">Tiempo detenido</td>
+                      <td className="px-5 py-3 text-right font-bold text-[#367C2B]">0 min</td>
+                      <td className="px-5 py-3 text-right font-bold text-gray-700">{reporteActual.sinSistema.minutosParados} min</td>
+                    </tr>
+                    <tr>
+                      <td className="px-5 py-3 text-gray-700">Zonas con labor deficiente</td>
+                      <td className="px-5 py-3 text-right font-bold text-[#367C2B]">0</td>
+                      <td className="px-5 py-3 text-right font-bold text-gray-700">{reporteActual.sinSistema.zonasDeficientes}</td>
+                    </tr>
+                    <tr>
+                      <td className="px-5 py-3 text-gray-700">Energía consumida</td>
+                      <td className="px-5 py-3 text-right font-bold text-[#367C2B]">{reporteActual.conSistema.kwhConsumidos.toFixed(2)} kWh</td>
+                      <td className="px-5 py-3 text-right font-bold text-gray-700">{reporteActual.sinSistema.kwhConsumidos.toFixed(2)} kWh</td>
+                    </tr>
+                    <tr>
+                      <td className="px-5 py-3 text-gray-700">Batería restante</td>
+                      <td className="px-5 py-3 text-right font-bold text-[#367C2B]">{reporteActual.conSistema.bateriaRestante.toFixed(1)}%</td>
+                      <td className="px-5 py-3 text-right font-bold text-gray-700">{reporteActual.sinSistema.bateriaRestante.toFixed(1)}%</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Datos de la parcela */}
+              <div className="border border-gray-200">
+                <div className="bg-gray-100 px-5 py-3 border-b border-gray-200">
+                  <h3 className="text-sm font-bold uppercase tracking-wider text-gray-700">Datos de la parcela</h3>
+                </div>
+                <div className="grid grid-cols-3 divide-x divide-gray-100">
+                  <div className="px-5 py-4">
+                    <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Celdas recorridas</p>
+                    <p className="text-2xl font-bold text-[#1A1A1A]">{reporteActual.parcela.celdasRecorridas}</p>
+                  </div>
+                  <div className="px-5 py-4">
+                    <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Tiempo de jornada</p>
+                    <p className="text-2xl font-bold text-[#1A1A1A]">{reporteActual.parcela.tiempoTotal.toFixed(0)} <span className="text-base font-semibold text-gray-500">min</span></p>
+                  </div>
+                  <div className="px-5 py-4">
+                    <p className="text-xs text-gray-500 uppercase tracking-wide mb-1">Amperaje promedio</p>
+                    <p className="text-2xl font-bold text-[#1A1A1A]">{reporteActual.parcela.amperajePromedio.toFixed(1)} <span className="text-base font-semibold text-gray-500">A</span></p>
+                  </div>
+                </div>
+              </div>
+
+              <p className="text-xs text-gray-400 leading-relaxed">
+                Estimaciones basadas en tarifa eléctrica industrial, costo de operación por minuto (operador, máquina y superficie no cosechada) y pérdida de rendimiento por labor deficiente. Valores en pesos mexicanos.
+              </p>
+
+              {/* Botón de Cerrar */}
+              <button
+                onClick={() => setMostrarReporte(false)}
+                className="w-full bg-[#367C2B] hover:bg-[#2b6322] text-white font-semibold text-sm py-3 uppercase tracking-wider transition-colors"
+              >
+                Cerrar
+              </button>
+
             </div>
 
           </div>
