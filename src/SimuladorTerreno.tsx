@@ -109,6 +109,34 @@ export default function SimuladorTerreno({ onTick }: { onTick?: (estado: any) =>
     }
   }, [mapSize, simState]);
 
+  // --- PLANIFICADOR DE JORNADA: publicar el diseño del lote ---
+  // Mientras se diseña el terreno (IDLE), publica un resumen por tipo de suelo
+  // y los parámetros actuales para que el dashboard planifique sobre el lote REAL.
+  useEffect(() => {
+    if (grid.length === 0) return;
+    const conteo: Record<string, number> = {};
+    grid.forEach(row => row.forEach(cell => { conteo[cell] = (conteo[cell] || 0) + 1; }));
+
+    const zonas = Object.entries(conteo).map(([id, celdas]) => {
+      const tipo = CELL_TYPES[id as keyof typeof CELL_TYPES];
+      return { tipo: tipo.name, celdas, k: tipo.k };
+    }).sort((a, b) => a.k - b.k);
+
+    const planLote = {
+      zonas,
+      celdasTotales: mapSize * mapSize,
+      params: { a: paramA, n: paramN, v: paramV, volt: paramVolt, eff: paramEff, maxI: paramMaxI },
+      profundidadRecomendada: paramD,
+      ts: Date.now()
+    };
+
+    try {
+      localStorage.setItem('plan_lote', JSON.stringify(planLote));
+    } catch (e) {
+      console.error("Error writing plan_lote", e);
+    }
+  }, [grid, mapSize, paramA, paramN, paramV, paramVolt, paramEff, paramMaxI, paramD]);
+
   // Generar aleatorio
   const randomizeGrid = () => {
     if (simState !== 'IDLE') return;

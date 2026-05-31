@@ -156,6 +156,72 @@ const PERFIL_OPERADOR = {
   unidad: "EV-7820"
 };
 
+// --- PLANIFICADOR DE JORNADA (IA) ---
+// Batería disponible al inicio de la jornada (kWh). Coincide con el simulador.
+const BATERIA_JORNADA_KWH = 50;
+
+type PlanParams = { a: number; n: number; v: number; volt: number; eff: number; maxI: number };
+type ZonaLote = { tipo: string; celdas: number; k: number };
+
+// Energía (kWh) que consume una celda de resistencia k a profundidad d (cm).
+// Mismo modelo físico que el simulador (incluye factor 8x de la demo).
+function kWhPorCelda(k: number, d: number, p: PlanParams) {
+  const v_ms = p.v / 3.6;
+  const kW = (k * p.a * (d / 100) * p.n * v_ms) / p.eff; // kW = amp * volt / 1000, volt se cancela
+  const timeInHours = 0.001 / p.v;
+  return kW * timeInHours * 8;
+}
+
+// Profundidad máxima (cm) que mantiene el amperaje bajo el límite en un suelo k.
+function profundidadSegura(k: number, p: PlanParams) {
+  const v_ms = p.v / 3.6;
+  const coef = (k * p.a * p.n * 1000 * v_ms) / p.eff / p.volt / 100;
+  return coef > 0 ? p.maxI / coef : 40;
+}
+
+// Compara dos escenarios sobre el lote REAL definido en el simulador:
+//  - Profundidad fija recomendada (sin gestión adaptativa)
+//  - Plan IA: profundidad adaptativa que respeta el límite eléctrico por zona
+function planificarJornada(dRecomendada: number, lote: ZonaLote[], params: PlanParams, bateria: number) {
+  let energiaFija = 0;
+  let energiaPlan = 0;
+  let celdasTotales = 0;
+  let zonasAjustadas = 0;
+
+  const zonas = lote.map(z => {
+    celdasTotales += z.celdas;
+    const eFija = kWhPorCelda(z.k, dRecomendada, params) * z.celdas;
+
+    // Profundidad del plan: nunca menos de 10cm, nunca más que la recomendada.
+    const dSegura = profundidadSegura(z.k, params);
+    const dPlan = Math.max(10, Math.min(dRecomendada, dSegura));
+    const ePlan = kWhPorCelda(z.k, dPlan, params) * z.celdas;
+    const ajustada = dPlan < dRecomendada - 0.1;
+    if (ajustada) zonasAjustadas++;
+
+    energiaFija += eFija;
+    energiaPlan += ePlan;
+    return { ...z, dPlan: Math.round(dPlan), ajustada, energiaPlan: ePlan };
+  });
+
+  // Cobertura del lote si se opera a profundidad fija hasta agotar batería.
+  const coberturaFija = energiaFija > 0 ? Math.min(100, (bateria / energiaFija) * 100) : 100;
+  const margenPlan = ((bateria - energiaPlan) / bateria) * 100;
+
+  return {
+    bateria,
+    celdasTotales,
+    zonasAjustadas,
+    energiaFija,
+    energiaPlan,
+    coberturaFija,                       // % del lote que cubrirías sin gestión
+    margenPlan,                          // % de batería restante con el plan IA
+    fijaAlcanza: energiaFija <= bateria,
+    planAlcanza: energiaPlan <= bateria,
+    zonas
+  };
+}
+
 export default function App() {
   const [data, setData] = useState(INITIAL_STATE);
   const [sesionIniciada, setSesionIniciada] = useState(false);
@@ -169,6 +235,8 @@ export default function App() {
   }>>([]);
   const [mostrarReporte, setMostrarReporte] = useState(false);
   const [reporteActual, setReporteActual] = useState<any>(null);
+  // Lote diseñado en el simulador (para el planificador de jornada)
+  const [planLote, setPlanLote] = useState<any>(null);
   // Cooldown anti-rebote: tras una decisión del operador, evita re-disparar la alerta
   // predictiva durante unos ticks mientras el tractor cruza la zona ya advertida.
   const alertCooldownRef = useRef(0);
@@ -239,6 +307,25 @@ export default function App() {
     };
     window.addEventListener('storage',h);
     return()=>window.removeEventListener('storage',h); 
+  }, []);
+
+  // --- PLANIFICADOR: leer el lote diseñado en el simulador ---
+  useEffect(() => {
+    const cargar = () => {
+      try {
+        const raw = localStorage.getItem('plan_lote');
+        if (raw) setPlanLote(JSON.parse(raw));
+      } catch (e) { /* ignore */ }
+    };
+    cargar(); // al montar (lote ya definido en otra pestaña)
+
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === 'plan_lote' && e.newValue) {
+        try { setPlanLote(JSON.parse(e.newValue)); } catch (err) { /* ignore */ }
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
   }, []);
 
   // Función para generar reporte de eficiencia
@@ -402,12 +489,17 @@ export default function App() {
 
   // --- Pantalla de bienvenida / perfil del operador ---
   if (!sesionIniciada) {
+    // Planifica sobre el lote REAL diseñado en el simulador (si ya existe).
+    const dRec = planLote?.profundidadRecomendada ?? PERFIL_OPERADOR.profundidadRecomendada;
+    const plan = planLote
+      ? planificarJornada(dRec, planLote.zonas, planLote.params, BATERIA_JORNADA_KWH)
+      : null;
     return (
       <div className="min-h-screen bg-[#1A1A1A] text-white font-sans flex flex-col items-center justify-center p-6 relative overflow-hidden">
         {/* Franja superior corporativa */}
         <div className="absolute top-0 left-0 right-0 h-1.5 bg-[#FFDE00]"></div>
 
-        <div className="w-full max-w-lg">
+        <div className="w-full max-w-2xl">
           {/* Marca */}
           <div className="flex items-center gap-3 mb-10">
             <img
@@ -447,6 +539,101 @@ export default function App() {
               <span className="text-sm text-white/50 uppercase tracking-wide">Profundidad recomendada</span>
               <span className="text-lg font-bold text-[#FFDE00]">{PERFIL_OPERADOR.profundidadRecomendada} cm</span>
             </div>
+          </div>
+
+          {/* PLANIFICADOR DE JORNADA (IA) */}
+          <div className="bg-white/5 border border-white/10 rounded-lg mb-8 overflow-hidden">
+            <div className="flex items-center justify-between px-5 py-3 border-b border-white/10">
+              <div className="flex items-center gap-2">
+                <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#38bdf8" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M3 3v18h18"/><path d="m19 9-5 5-4-4-3 3"/></svg>
+                <span className="text-xs font-bold uppercase tracking-wider text-[#38bdf8]">Plan de Jornada · IA</span>
+              </div>
+              {plan && <span className="text-[11px] text-white/40">{plan.celdasTotales} celdas · {plan.bateria} kWh</span>}
+            </div>
+
+            {!plan ? (
+              /* Lote aún no definido en el simulador */
+              <div className="px-5 py-6 text-center">
+                <p className="text-sm text-white/70 leading-relaxed">
+                  Define el lote del día en el <span className="font-bold text-[#38bdf8]">Simulador de Terreno</span> para que la IA planifique tu jornada.
+                </p>
+                <p className="text-xs text-white/40 mt-2 mb-4">
+                  La IA estimará si la batería alcanza para cubrir todo el lote y propondrá un plan adaptativo.
+                </p>
+                <a
+                  href="/simulador"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-2 text-sm font-bold text-[#38bdf8] border border-[#38bdf8]/40 hover:bg-[#38bdf8]/10 px-4 py-2 rounded transition-colors"
+                >
+                  Abrir Simulador de Terreno
+                  <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M7 17 17 7"/><path d="M7 7h10v10"/></svg>
+                </a>
+              </div>
+            ) : (
+            <>
+            {/* Veredicto principal */}
+            <div className="px-5 py-4">
+              {plan.fijaAlcanza ? (
+                <p className="text-base leading-relaxed">
+                  A profundidad recomendada terminas el lote con <span className="font-bold text-[#7db356]">{((plan.bateria - plan.energiaFija) / plan.bateria * 100).toFixed(0)}%</span> de batería de margen.
+                </p>
+              ) : (
+                <>
+                  <p className="text-base leading-relaxed mb-3">
+                    A profundidad fija de {dRec}cm <span className="font-bold text-[#f87171]">no alcanzas</span>: cubrirías solo <span className="font-bold text-[#f87171]">{plan.coberturaFija.toFixed(0)}%</span> del lote antes de agotar la batería.
+                  </p>
+                  {plan.planAlcanza ? (
+                    <div className="flex items-start gap-2 bg-[#0f2e1a] border-l-4 border-[#7db356] px-3 py-2 rounded-r">
+                      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="#7db356" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="mt-0.5 shrink-0"><path d="M20 6 9 17l-5-5"/></svg>
+                      <p className="text-sm leading-snug text-white/90">
+                        <span className="font-bold text-[#7db356]">Plan IA:</span> reduzco profundidad en {plan.zonasAjustadas} {plan.zonasAjustadas === 1 ? 'zona dura' : 'zonas duras'} y completas el lote con <span className="font-bold text-[#7db356]">{plan.margenPlan.toFixed(0)}%</span> de margen.
+                      </p>
+                    </div>
+                  ) : (
+                    <div className="flex items-start gap-2 bg-[#2e1a0f] border-l-4 border-[#FFDE00] px-3 py-2 rounded-r">
+                      <p className="text-sm leading-snug text-white/90">
+                        <span className="font-bold text-[#FFDE00]">Aviso:</span> ni con el plan adaptativo completas el lote. Recomendación: cargar a tope o dividir en dos jornadas.
+                      </p>
+                    </div>
+                  )}
+                </>
+              )}
+            </div>
+
+            {/* Desglose por zona */}
+            <div className="px-5 pb-4">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-[10px] uppercase tracking-wide text-white/40 border-b border-white/10">
+                    <th className="text-left font-semibold py-2">Zona del lote</th>
+                    <th className="text-right font-semibold py-2">Superficie</th>
+                    <th className="text-right font-semibold py-2">Prof. plan</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-white/5">
+                  {plan.zonas.map(z => (
+                    <tr key={z.tipo}>
+                      <td className="py-2 text-white/80">{z.tipo}</td>
+                      <td className="py-2 text-right text-white/60">{z.celdas} celdas</td>
+                      <td className="py-2 text-right font-bold">
+                        {z.ajustada ? (
+                          <span className="text-[#FFDE00]">{z.dPlan} cm</span>
+                        ) : (
+                          <span className="text-white/80">{z.dPlan} cm</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div className="flex justify-between items-center mt-3 pt-3 border-t border-white/10 text-sm">
+                <span className="text-white/50">Energía estimada con plan IA</span>
+                <span className="font-bold">{plan.energiaPlan.toFixed(1)} / {plan.bateria} kWh</span>
+              </div>
+            </div>
+            </>
+            )}
           </div>
 
           {/* Acción única */}
